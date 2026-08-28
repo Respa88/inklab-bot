@@ -369,6 +369,9 @@ support_replies = {}
 # через кнопку "Ответить".
 admin_reply_target = None
 
+# Админская ручная выдача пакетов: admin_id -> target_user_id / '__WAITING_ID__'
+admin_grant_target = {}
+
 
 # =========================================================
 # ПРОФЕССИИ
@@ -632,9 +635,34 @@ def admin_menu():
             [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
             [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")],
             [InlineKeyboardButton(text="💬 Ответить пользователю", callback_data="admin_support")],
+            [InlineKeyboardButton(text="📦 Выдать базу", callback_data="grant_package")],
             [InlineKeyboardButton(text="← Главное меню", callback_data="main_menu")]
         ]
     )
+
+def admin_grant_profession_menu():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🎨 Дизайнер", callback_data="grant_profession_designer")],
+            [InlineKeyboardButton(text="📱 SMM", callback_data="grant_profession_smm")],
+            [InlineKeyboardButton(text="🎯 Таргетолог", callback_data="grant_profession_target")],
+            [InlineKeyboardButton(text="📈 Маркетолог", callback_data="grant_profession_marketer")],
+            [InlineKeyboardButton(text="✍️ Копирайтер", callback_data="grant_profession_copywriter")],
+            [InlineKeyboardButton(text="← Админ-панель", callback_data="admin_back")]
+        ]
+    )
+
+
+def admin_grant_tariff_menu(profession_key):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⚡ START - 199 ₽", callback_data=f"grant_tariff_start_{profession_key}")],
+            [InlineKeyboardButton(text="🚀 PRO - 349 ₽", callback_data=f"grant_tariff_pro_{profession_key}")],
+            [InlineKeyboardButton(text="👑 MAX - 890 ₽", callback_data=f"grant_tariff_max_{profession_key}")],
+            [InlineKeyboardButton(text="← К профессиям", callback_data="grant_package")]
+        ]
+    )
+
 
 def admin_stats_text():
     users, paid, revenue = get_admin_stats()
@@ -1025,6 +1053,24 @@ async def support_message_handler(message: Message):
 
     register_user(message.from_user)
 
+    # Если админ сейчас выдаёт пакет — первое сообщение должно быть ID.
+    if is_admin(message.from_user) and admin_grant_target.get(message.from_user.id) == "__WAITING_ID__":
+        raw_id = message.text.strip()
+        if not raw_id.isdigit():
+            await message.answer(
+                "⚠️ ID должен состоять только из цифр.\n\n"
+                "Отправь числовой Telegram ID пользователя."
+            )
+            return
+
+        admin_grant_target[message.from_user.id] = int(raw_id)
+        await message.answer(
+            f"✅ Пользователь выбран: <code>{int(raw_id)}</code>\n\n"
+            "Теперь выбери профессию:",
+            reply_markup=admin_grant_profession_menu()
+        )
+        return
+
     # Администратор отвечает пользователю через кнопку "Ответить"
     # или обычной функцией Telegram "Ответить".
     if is_admin(message.from_user):
@@ -1143,6 +1189,144 @@ async def support_reply_button_handler(callback: CallbackQuery):
 # =========================================================
 # АДМИН
 # =========================================================
+
+
+@dp.callback_query(F.data == "grant_package")
+async def grant_package_handler(callback: CallbackQuery):
+    if not is_admin(callback.from_user):
+        await callback.answer("⛔ Доступ запрещен.", show_alert=True)
+        return
+
+    admin_grant_target[callback.from_user.id] = "__WAITING_ID__"
+    await callback.answer()
+    await callback.message.answer(
+        "<b>📦 Выдать базу</b>\n\n"
+        "Отправь сюда <b>числовой Telegram ID</b> пользователя.\n\n"
+        "Затем выберешь профессию и тариф. Бот отметит пакет как "
+        "оплаченный и отправит соответствующий PDF.\n\n"
+        "⚠️ Пользователь должен хотя бы один раз открыть бота "
+        "и нажать /start, иначе Telegram может не разрешить "
+        "отправить ему документ."
+    )
+
+
+@dp.callback_query(F.data == "admin_back")
+async def admin_back_handler(callback: CallbackQuery):
+    if not is_admin(callback.from_user):
+        await callback.answer("⛔ Доступ запрещен.", show_alert=True)
+        return
+
+    admin_grant_target.pop(callback.from_user.id, None)
+    await callback.answer()
+    await replace_callback_with_text(callback, admin_stats_text(), admin_menu())
+
+
+@dp.callback_query(F.data.startswith("grant_profession_"))
+async def grant_profession_handler(callback: CallbackQuery):
+    if not is_admin(callback.from_user):
+        await callback.answer("⛔ Доступ запрещен.", show_alert=True)
+        return
+
+    target_id = admin_grant_target.get(callback.from_user.id)
+    if not isinstance(target_id, int):
+        await callback.answer("Сначала укажи ID пользователя.", show_alert=True)
+        return
+
+    profession_key = callback.data.replace("grant_profession_", "")
+    profession = PROFESSIONS.get(profession_key)
+    if not profession:
+        await callback.answer("Неизвестная профессия.", show_alert=True)
+        return
+
+    await callback.answer()
+    await replace_callback_with_text(
+        callback,
+        f"<b>📦 Выдача базы</b>\n\n"
+        f"👤 ID: <code>{target_id}</code>\n"
+        f"📌 Профессия: {profession['name']}\n\n"
+        "Выбери тариф:",
+        admin_grant_tariff_menu(profession_key)
+    )
+
+
+@dp.callback_query(F.data.startswith("grant_tariff_"))
+async def grant_tariff_handler(callback: CallbackQuery):
+    if not is_admin(callback.from_user):
+        await callback.answer("⛔ Доступ запрещен.", show_alert=True)
+        return
+
+    target_id = admin_grant_target.get(callback.from_user.id)
+    if not isinstance(target_id, int):
+        await callback.answer("Сначала укажи ID пользователя.", show_alert=True)
+        return
+
+    parts = callback.data.split("_")
+    if len(parts) != 4:
+        await callback.answer("Ошибка пакета.", show_alert=True)
+        return
+
+    tariff_key = parts[2]
+    profession_key = parts[3]
+    tariff = TARIFFS.get(tariff_key)
+    profession = PROFESSIONS.get(profession_key)
+    pdf_path = get_tariff_pdf_path(profession_key, tariff_key)
+
+    if not tariff or not profession or not pdf_path:
+        await callback.answer("Пакет не найден.", show_alert=True)
+        return
+
+    # Выданный админом пакет появляется у пользователя в «Мои покупки».
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    try:
+        with closing(db_connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO purchases
+                    (user_id, profession, tariff, amount, status, created_at)
+                VALUES (?, ?, ?, ?, 'paid', ?)
+                """,
+                (target_id, profession["name"], tariff["name"], tariff["price"], now),
+            )
+            conn.commit()
+    except Exception:
+        logging.exception(
+            "Ошибка ручной выдачи: user_id=%s profession=%s tariff=%s",
+            target_id, profession_key, tariff_key
+        )
+        await callback.answer("Ошибка записи покупки.", show_alert=True)
+        return
+
+    await callback.answer("База выдана ✅")
+    sent = await send_tariff_pdf(target_id, profession_key, tariff_key)
+    admin_grant_target.pop(callback.from_user.id, None)
+
+    if sent:
+        result = (
+            "<b>✅ База выдана</b>\n\n"
+            f"👤 ID: <code>{target_id}</code>\n"
+            f"📌 {profession['name']}\n"
+            f"📦 {tariff['name']}\n\n"
+            "PDF отправлен пользователю."
+        )
+    else:
+        result = (
+            "<b>⚠️ База записана, но PDF не отправлен</b>\n\n"
+            f"👤 ID: <code>{target_id}</code>\n"
+            f"📌 {profession['name']}\n"
+            f"📦 {tariff['name']}\n\n"
+            "Проверь, что пользователь уже запускал бота и что PDF есть в репозитории."
+        )
+
+    await callback.message.answer(
+        result,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📦 Выдать ещё базу", callback_data="grant_package")],
+                [InlineKeyboardButton(text="← Админ-панель", callback_data="admin_back")]
+            ]
+        )
+    )
+
 
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats_handler(callback: CallbackQuery):
