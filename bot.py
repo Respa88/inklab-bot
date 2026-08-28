@@ -43,6 +43,23 @@ PORT = int(os.getenv("PORT", "10000"))
 # БОТ
 # =========================================================
 
+from datetime import datetime
+
+import sqlite3
+from contextlib import closing
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardRemove,
+)
+
 dp = Dispatcher()
 
 bot = Bot(
@@ -54,6 +71,107 @@ bot = Bot(
 
 
 # =========================================================
+# БАЗА ДАННЫХ
+# =========================================================
+
+DB_PATH = os.getenv("DB_PATH", "inklab.db")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "inklab1").lstrip("@").lower()
+
+def db_connect():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    with closing(db_connect()) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS purchases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                profession TEXT,
+                tariff TEXT,
+                amount INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'paid',
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+
+def register_user(user):
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with closing(db_connect()) as conn:
+        conn.execute("""
+            INSERT INTO users
+                (user_id, username, first_name, last_name, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username=excluded.username,
+                first_name=excluded.first_name,
+                last_name=excluded.last_name,
+                last_seen=excluded.last_seen
+        """, (
+            user.id,
+            user.username or "",
+            user.first_name or "",
+            user.last_name or "",
+            now,
+            now
+        ))
+        conn.commit()
+
+def get_admin_stats():
+    with closing(db_connect()) as conn:
+        users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        paid = conn.execute(
+            "SELECT COUNT(*) FROM purchases WHERE status='paid'"
+        ).fetchone()[0]
+        revenue = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM purchases WHERE status='paid'"
+        ).fetchone()[0]
+        return users, paid, revenue
+
+def get_users(limit=100):
+    with closing(db_connect()) as conn:
+        return conn.execute("""
+            SELECT user_id, username, first_name, last_name,
+                   first_seen, last_seen
+            FROM users
+            ORDER BY last_seen DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+
+def is_admin(user):
+    return bool(
+        user
+        and user.username
+        and user.username.lower() == ADMIN_USERNAME
+    )
+
+
+# =========================================================
+# ПОДДЕРЖКА
+# =========================================================
+
+# user_id администратора -> True, если он сейчас ожидает сообщение
+# от пользователя в режиме поддержки.
+support_mode = set()
+
+# message_id сообщения пользователя в админском чате -> user_id.
+# Это позволяет админу просто нажать "Ответить" на сообщение.
+support_replies = {}
+
+
+# =========================================================
 # ПРОФЕССИИ
 # =========================================================
 
@@ -62,127 +180,95 @@ PROFESSIONS = {
     "designer": {
         "name": "🎨 Дизайнер",
         "title": "База клиентов для дизайнеров",
-
         "intro": (
             "<b>🎨 Дизайнер</b>\n\n"
-            "Ты зашел в раздел базы клиентов для дизайнеров.\n\n"
-            "Если ты умеешь создавать дизайн, одна из главных "
-            "задач на фрилансе - постоянно находить людей и "
-            "бизнесы, которым нужны твои услуги.\n\n"
-            "Самая частая проблема фрилансера - не отсутствие "
-            "навыков, а отсутствие стабильного потока клиентов.\n\n"
-            "Можно часами искать заказы самостоятельно, "
-            "перебирать Telegram-чаты, каналы, группы и сайты. "
-            "INKLAB создан для того, чтобы сократить это время.\n\n"
-            "<b>Ты получаешь готовую базу источников, где "
-            "можно искать заказы и потенциальных клиентов.</b>\n\n"
-            "Это не означает, что клиенты начнут писать тебе "
-            "автоматически. Но у тебя появляется главное - "
-            "готовые места для регулярного поиска.\n\n"
-            "Чем системнее ты работаешь с базой, тем проще "
-            "поддерживать постоянный поток предложений и "
-            "новых контактов.\n\n"
-            "<b>Не ищи каждый раз с нуля. Используй готовую "
-            "систему и направляй время на работу с клиентами.</b>"
+            "Здесь собрана база источников именно для дизайнеров: "
+            "места, где появляются вакансии, заказы и запросы бизнеса "
+            "на дизайн.\n\n"
+            "<b>Зачем она нужна?</b>\n"
+            "Вместо того чтобы каждый день искать с нуля Telegram-чаты, "
+            "каналы, VK-сообщества и площадки, ты получаешь готовую "
+            "систему источников в одном месте.\n\n"
+            "С базой проще регулярно видеть новые возможности, "
+            "быстрее находить подходящие проекты и не зависеть только "
+            "от случайных входящих заявок.\n\n"
+            "<b>Выбирай тариф ниже и используй базу как рабочий "
+            "инструмент для постоянного поиска клиентов.</b>"
         )
     },
 
     "smm": {
         "name": "📱 SMM",
         "title": "База клиентов для SMM",
-
         "intro": (
             "<b>📱 SMM</b>\n\n"
-            "Ты зашел в раздел базы клиентов для SMM-специалистов.\n\n"
-            "Для SMM-специалиста важно не только хорошо вести "
-            "социальные сети, но и постоянно находить бизнесы, "
-            "которым нужны твои услуги.\n\n"
-            "Проблема многих фрилансеров - поиск клиентов "
-            "занимает слишком много времени.\n\n"
-            "INKLAB собирает источники в одном месте, чтобы "
-            "тебе не приходилось самостоятельно искать новые "
-            "чаты, каналы, группы и площадки.\n\n"
-            "<b>Ты получаешь готовую основу для регулярного "
-            "поиска потенциальных клиентов.</b>\n\n"
-            "Это не обещание автоматических заказов. "
-            "База дает тебе инструменты и источники, "
-            "а результат зависит от твоей активности, "
-            "предложения и общения с клиентами.\n\n"
-            "<b>Твоя задача - регулярно использовать базу "
-            "и превращать найденные контакты в реальные сделки.</b>"
+            "Здесь собрана база источников для SMM-специалистов: "
+            "вакансии, проекты, бизнес-сообщества и площадки, "
+            "где можно находить потенциальных клиентов.\n\n"
+            "<b>Зачем она нужна?</b>\n"
+            "Ты экономишь время на самостоятельном поиске источников "
+            "и получаешь готовые места, которые можно регулярно проверять.\n\n"
+            "Это помогает быстрее находить бизнесы, которым уже сейчас "
+            "нужен SMM, и выстраивать постоянный поток поиска вместо "
+            "ожидания случайных заявок.\n\n"
+            "<b>Выбирай тариф и используй базу как часть своей "
+            "ежедневной работы.</b>"
         )
     },
 
     "target": {
         "name": "🎯 Таргетолог",
         "title": "База клиентов для таргетологов",
-
         "intro": (
             "<b>🎯 Таргетолог</b>\n\n"
-            "Ты зашел в раздел базы клиентов для таргетологов.\n\n"
-            "Таргетологу постоянно нужны новые проекты и бизнесы, "
-            "которым необходимо привлечение клиентов и настройка рекламы.\n\n"
-            "Вместо того чтобы каждый день искать источники "
-            "самостоятельно, ты получаешь готовую подборку "
-            "мест, где можно искать потенциальных заказчиков.\n\n"
-            "<b>Главная ценность базы - экономия времени "
-            "на поиске источников.</b>\n\n"
-            "Ты можешь регулярно открывать базу, находить "
-            "подходящие предложения и связываться с потенциальными "
-            "клиентами.\n\n"
-            "Чем больше качественных контактов ты обрабатываешь "
-            "и чем лучше умеешь продавать свои услуги, тем больше "
-            "возможностей появляется для получения заказов.\n\n"
-            "<b>INKLAB превращает поиск клиентов из хаотичного "
-            "занятия в понятный рабочий процесс.</b>"
+            "Здесь собраны источники для таргетологов: вакансии, "
+            "проекты и площадки, где бизнес ищет специалистов "
+            "по рекламе и привлечению клиентов.\n\n"
+            "<b>Зачем она нужна?</b>\n"
+            "Не нужно каждый раз заново искать, где есть спрос. "
+            "Ты получаешь готовую карту источников и можешь регулярно "
+            "проверять новые предложения.\n\n"
+            "Чем системнее ты работаешь с базой и качественнее "
+            "презентуешь свои услуги, тем больше подходящих "
+            "возможностей для получения заказов.\n\n"
+            "<b>Выбирай тариф и превращай поиск клиентов "
+            "в понятный рабочий процесс.</b>"
         )
     },
 
     "marketer": {
         "name": "📈 Маркетолог",
         "title": "База клиентов для маркетологов",
-
         "intro": (
             "<b>📈 Маркетолог</b>\n\n"
-            "Ты зашел в раздел базы клиентов для маркетологов.\n\n"
-            "Маркетологу постоянно приходится искать новые проекты, "
-            "бизнесы и компании, которым нужны продвижение, "
-            "продажи и развитие.\n\n"
-            "Главная проблема - хорошие источники разбросаны "
-            "по множеству разных площадок.\n\n"
-            "INKLAB помогает собрать этот поиск в одном месте.\n\n"
-            "<b>Вместо бесконечного поиска источников ты получаешь "
-            "готовую базу для ежедневной работы.</b>\n\n"
-            "База не гарантирует получение заказа сама по себе. "
-            "Она дает тебе больше возможностей для поиска, "
-            "а результат зависит от того, как ты используешь "
-            "источники и общаешься с потенциальными клиентами.\n\n"
-            "<b>Твоя задача - находить подходящие проекты, "
-            "делать сильное предложение и доводить общение "
-            "до сделки.</b>"
+            "Здесь собраны источники для маркетологов: digital, "
+            "performance, growth, B2B, контент, продвижение, "
+            "аналитика и другие направления.\n\n"
+            "<b>Зачем она нужна?</b>\n"
+            "Хорошие источники спроса разбросаны по множеству площадок. "
+            "INKLAB собирает их в одном месте, чтобы ты мог быстрее "
+            "находить компании и проекты.\n\n"
+            "Регулярная работа с базой помогает не ждать входящие заявки, "
+            "а самостоятельно создавать поток новых возможностей.\n\n"
+            "<b>Выбирай тариф и используй базу для ежедневного поиска.</b>"
         )
     },
 
     "copywriter": {
         "name": "✍️ Копирайтер",
         "title": "База клиентов для копирайтеров",
-
         "intro": (
             "<b>✍️ Копирайтер</b>\n\n"
-            "Ты зашел в раздел базы клиентов для копирайтеров.\n\n"
-            "Копирайтеру важно не ждать случайных заказов, "
-            "а иметь понятный список источников, где можно "
-            "регулярно искать новые проекты.\n\n"
-            "INKLAB собирает такие источники в одном месте.\n\n"
-            "<b>Ты экономишь время на поиске и получаешь "
-            "готовую основу для ежедневной работы.</b>\n\n"
-            "В зависимости от тарифа ты получишь разные объемы "
-            "источников и дополнительные материалы для поиска "
-            "и общения с потенциальными клиентами.\n\n"
-            "База сама не гарантирует заказы. Ее задача - "
-            "дать тебе больше качественных возможностей для поиска.\n\n"
-            "<b>Чем регулярнее ты работаешь с источниками, "
-            "тем больше потенциальных клиентов можешь находить.</b>"
+            "Здесь собраны источники для копирайтеров, авторов "
+            "и редакторов: заказы на статьи, коммерческие тексты, "
+            "контент, SEO, сценарии и редактуру.\n\n"
+            "<b>Зачем она нужна?</b>\n"
+            "Вместо постоянного поиска новых площадок ты получаешь "
+            "готовую основу для регулярного поиска проектов.\n\n"
+            "Это позволяет быстрее замечать новые заказы, "
+            "экономить время и постепенно выстраивать собственный "
+            "поток клиентов.\n\n"
+            "<b>Выбирай тариф и используй базу как рабочий инструмент.</b>"
         )
     }
 }
@@ -197,7 +283,7 @@ TARIFFS = {
     "start": {
         "name": "⚡ START",
         "title": "Базовый набор для старта",
-
+        "price": 199,
         "description": (
             "<b>⚡ START</b>\n\n"
             "Подойдет, если ты хочешь начать системно искать "
@@ -217,46 +303,47 @@ TARIFFS = {
     "pro": {
         "name": "🚀 PRO",
         "title": "Расширенная база для регулярного поиска",
-
+        "price": 349,
         "description": (
             "<b>🚀 PRO</b>\n\n"
-            "Для фрилансеров, которые хотят получить больше "
-            "источников и возможностей для поиска клиентов.\n\n"
+            "Самый выгодный вариант для фрилансера, который хочет "
+            "получить больше источников и готовую систему поиска.\n\n"
             "<b>Что будет внутри:</b>\n"
-            "• все возможности START\n"
-            "• расширенная база источников\n"
-            "• дополнительные Telegram-каналы\n"
-            "• дополнительные Telegram-чаты\n"
-            "• дополнительные площадки\n"
-            "• источники для холодного поиска\n"
+            "• 30 источников поиска\n"
+            "• 20 Telegram-источников\n"
+            "• 5 VK-групп\n"
+            "• 5 сайтов и приложений\n"
+            "• система поиска клиентов\n"
             "• рекомендации по ежедневному поиску\n"
             "• шаблоны первого сообщения клиенту\n\n"
-            "<b>Главная задача PRO</b> - дать тебе больше "
-            "вариантов для постоянного поиска новых проектов."
+            "<b>Главная задача PRO</b> - дать тебе максимум "
+            "полезного для регулярного поиска по адекватной цене."
         )
     },
 
     "max": {
         "name": "👑 MAX",
         "title": "Полная система поиска и продаж",
-
+        "price": 890,
         "description": (
             "<b>👑 MAX</b>\n\n"
             "Максимальный набор для тех, кто хочет использовать "
-            "INKLAB не просто как базу, а как полноценный рабочий инструмент.\n\n"
+            "INKLAB как полноценный рабочий инструмент.\n\n"
             "<b>Что будет внутри:</b>\n"
             "• все возможности PRO\n"
-            "• максимальная база источников\n"
+            "• расширенная база источников\n"
+            "• дополнительные площадки\n"
             "• система поиска клиентов\n"
             "• система продаж\n"
             "• готовые скрипты сообщений\n"
-            "• как правильно презентовать услуги\n"
+            "• как презентовать услуги\n"
             "• как отвечать на возражения\n"
             "• как обсуждать стоимость\n"
             "• как доводить клиента до оплаты\n"
-            "• система ежедневной работы\n\n"
+            "• система ежедневной работы\n"
+            "• повышение чека и повторные продажи\n\n"
             "<b>Главная задача MAX</b> - дать тебе не только "
-            "источники, но и понятную систему работы с клиентами."
+            "источники, но и расширенную систему работы с клиентами."
         )
     }
 }
@@ -267,39 +354,13 @@ TARIFFS = {
 # =========================================================
 
 def main_menu():
-
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👥 База клиентов",
-                    callback_data="clients"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📖 Система поиска клиентов",
-                    callback_data="search_system"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🎁 Бесплатно",
-                    callback_data="free"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🛍 Мои покупки",
-                    callback_data="purchases"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="💬 Поддержка",
-                    callback_data="support"
-                )
-            ]
+            [InlineKeyboardButton(text="👥 База клиентов", callback_data="clients")],
+            [InlineKeyboardButton(text="📖 Система поиска клиентов", callback_data="search_system")],
+            [InlineKeyboardButton(text="🎁 Бесплатно", callback_data="free")],
+            [InlineKeyboardButton(text="🛍 Мои покупки", callback_data="purchases")],
+            [InlineKeyboardButton(text="💬 Поддержка", callback_data="support")]
         ]
     )
 
@@ -309,45 +370,14 @@ def main_menu():
 # =========================================================
 
 def professions_menu():
-
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🎨 Дизайнер",
-                    callback_data="profession_designer"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📱 SMM",
-                    callback_data="profession_smm"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🎯 Таргетолог",
-                    callback_data="profession_target"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📈 Маркетолог",
-                    callback_data="profession_marketer"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="✍️ Копирайтер",
-                    callback_data="profession_copywriter"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="← Главное меню",
-                    callback_data="main_menu"
-                )
-            ]
+            [InlineKeyboardButton(text="🎨 Дизайнер", callback_data="profession_designer")],
+            [InlineKeyboardButton(text="📱 SMM", callback_data="profession_smm")],
+            [InlineKeyboardButton(text="🎯 Таргетолог", callback_data="profession_target")],
+            [InlineKeyboardButton(text="📈 Маркетолог", callback_data="profession_marketer")],
+            [InlineKeyboardButton(text="✍️ Копирайтер", callback_data="profession_copywriter")],
+            [InlineKeyboardButton(text="← Главное меню", callback_data="main_menu")]
         ]
     )
 
@@ -357,21 +387,10 @@ def professions_menu():
 # =========================================================
 
 def profession_intro_menu(profession_key):
-
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📦 Перейти к тарифам",
-                    callback_data=f"tariffs_{profession_key}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="← К направлениям",
-                    callback_data="clients"
-                )
-            ]
+            [InlineKeyboardButton(text="📦 Перейти к тарифам", callback_data=f"tariffs_{profession_key}")],
+            [InlineKeyboardButton(text="← К направлениям", callback_data="clients")]
         ]
     )
 
@@ -381,33 +400,12 @@ def profession_intro_menu(profession_key):
 # =========================================================
 
 def tariffs_menu(profession_key):
-
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⚡ START",
-                    callback_data=f"tariff_start_{profession_key}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🚀 PRO",
-                    callback_data=f"tariff_pro_{profession_key}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👑 MAX",
-                    callback_data=f"tariff_max_{profession_key}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="← К направлениям",
-                    callback_data="clients"
-                )
-            ]
+            [InlineKeyboardButton(text="⚡ START - 199 ₽", callback_data=f"tariff_start_{profession_key}")],
+            [InlineKeyboardButton(text="🚀 PRO - 349 ₽", callback_data=f"tariff_pro_{profession_key}")],
+            [InlineKeyboardButton(text="👑 MAX - 890 ₽", callback_data=f"tariff_max_{profession_key}")],
+            [InlineKeyboardButton(text="← К направлениям", callback_data="clients")]
         ]
     )
 
@@ -417,22 +415,36 @@ def tariffs_menu(profession_key):
 # =========================================================
 
 def tariff_detail_menu(tariff_key, profession_key):
-
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="💳 Купить",
-                    callback_data=f"buy_{tariff_key}_{profession_key}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="← К тарифам",
-                    callback_data=f"tariffs_{profession_key}"
-                )
-            ]
+            [InlineKeyboardButton(text="💳 Купить", callback_data=f"buy_{tariff_key}_{profession_key}")],
+            [InlineKeyboardButton(text="← К тарифам", callback_data=f"tariffs_{profession_key}")]
         ]
+    )
+
+
+# =========================================================
+# АДМИНКА
+# =========================================================
+
+def admin_menu():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+            [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")],
+            [InlineKeyboardButton(text="💬 Ответить пользователю", callback_data="admin_support")],
+            [InlineKeyboardButton(text="← Главное меню", callback_data="main_menu")]
+        ]
+    )
+
+def admin_stats_text():
+    users, paid, revenue = get_admin_stats()
+    return (
+        "<b>🔐 Админ-панель INKLAB</b>\n\n"
+        f"👥 Всего пользователей: <b>{users}</b>\n"
+        f"💳 Оплаченных покупок: <b>{paid}</b>\n"
+        f"💰 Заработано: <b>{revenue} ₽</b>\n\n"
+        "Статистика сохраняется в SQLite."
     )
 
 
@@ -442,8 +454,8 @@ def tariff_detail_menu(tariff_key, profession_key):
 
 @dp.message(CommandStart())
 async def start_handler(message: Message):
+    register_user(message.from_user)
 
-    # Удаляем старую нижнюю клавиатуру Telegram
     await message.answer(
         "Меню обновлено.",
         reply_markup=ReplyKeyboardRemove()
@@ -469,10 +481,7 @@ async def start_handler(message: Message):
         "<b>Выбери нужный раздел 👇</b>"
     )
 
-    await message.answer(
-        text,
-        reply_markup=main_menu()
-    )
+    await message.answer(text, reply_markup=main_menu())
 
 
 # =========================================================
@@ -481,21 +490,28 @@ async def start_handler(message: Message):
 
 @dp.callback_query(F.data == "clients")
 async def clients_handler(callback: CallbackQuery):
-
     await callback.answer()
 
     text = (
         "<b>👥 База клиентов</b>\n\n"
-        "Для каждой профессии мы собираем отдельную базу "
-        "источников для поиска клиентов и заказов.\n\n"
-        "Выбери свое направление, чтобы посмотреть "
-        "подробную информацию 👇"
+        "Здесь собраны отдельные базы для пяти профессий:\n"
+        "🎨 Дизайнер\n"
+        "📱 SMM\n"
+        "🎯 Таргетолог\n"
+        "📈 Маркетолог\n"
+        "✍️ Копирайтер\n\n"
+        "В каждой базе собраны Telegram-каналы и чаты, VK-сообщества, "
+        "сайты, биржи и другие площадки, где можно находить вакансии, "
+        "заказы и потенциальных клиентов.\n\n"
+        "<b>Почему это полезно?</b>\n"
+        "Тебе не придется каждый раз искать источники с нуля. "
+        "Готовая база экономит время и помогает сделать поиск клиентов "
+        "регулярной частью работы.\n\n"
+        "Выбери свою профессию - внутри сначала увидишь краткую "
+        "информацию о пользе базы, а затем сможешь перейти к тарифам 👇"
     )
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=professions_menu()
-    )
+    await callback.message.edit_text(text, reply_markup=professions_menu())
 
 
 # =========================================================
@@ -504,14 +520,9 @@ async def clients_handler(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("profession_"))
 async def profession_handler(callback: CallbackQuery):
-
     await callback.answer()
 
-    profession_key = callback.data.replace(
-        "profession_",
-        ""
-    )
-
+    profession_key = callback.data.replace("profession_", "")
     profession = PROFESSIONS.get(profession_key)
 
     if not profession:
@@ -529,14 +540,9 @@ async def profession_handler(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("tariffs_"))
 async def tariffs_handler(callback: CallbackQuery):
-
     await callback.answer()
 
-    profession_key = callback.data.replace(
-        "tariffs_",
-        ""
-    )
-
+    profession_key = callback.data.replace("tariffs_", "")
     profession = PROFESSIONS.get(profession_key)
 
     if not profession:
@@ -545,14 +551,13 @@ async def tariffs_handler(callback: CallbackQuery):
     text = (
         f"<b>{profession['title']}</b>\n\n"
         "Выбери подходящий тариф 👇\n\n"
-        "Чем выше тариф, тем больше источников и "
-        "дополнительных инструментов ты получаешь."
+        "🚀 <b>PRO - самый выгодный вариант:</b> 30 источников "
+        "и система поиска клиентов.\n\n"
+        "Чем выше тариф, тем больше источников и дополнительных "
+        "инструментов ты получаешь."
     )
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=tariffs_menu(profession_key)
-    )
+    await callback.message.edit_text(text, reply_markup=tariffs_menu(profession_key))
 
 
 # =========================================================
@@ -561,11 +566,9 @@ async def tariffs_handler(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("tariff_"))
 async def tariff_handler(callback: CallbackQuery):
-
     await callback.answer()
 
     parts = callback.data.split("_")
-
     if len(parts) != 3:
         return
 
@@ -581,16 +584,12 @@ async def tariff_handler(callback: CallbackQuery):
     text = (
         f"<b>{profession['name']}</b>\n\n"
         f"{tariff['description']}\n\n"
-        "<b>Стоимость:</b> будет добавлена после "
-        "подключения системы оплаты."
+        f"<b>Стоимость: {tariff['price']} ₽</b>"
     )
 
     await callback.message.edit_text(
         text,
-        reply_markup=tariff_detail_menu(
-            tariff_key,
-            profession_key
-        )
+        reply_markup=tariff_detail_menu(tariff_key, profession_key)
     )
 
 
@@ -600,11 +599,9 @@ async def tariff_handler(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("buy_"))
 async def buy_handler(callback: CallbackQuery):
-
     await callback.answer()
 
     parts = callback.data.split("_")
-
     if len(parts) != 3:
         return
 
@@ -621,35 +618,21 @@ async def buy_handler(callback: CallbackQuery):
         "<b>💳 Покупка</b>\n\n"
         f"{profession['name']}\n"
         f"{tariff['name']}\n\n"
-        "Сейчас система оплаты находится "
-        "на этапе подключения.\n\n"
-        "Здесь будет безопасная оплата, после которой "
-        "доступ к приобретенной базе будет выдаваться автоматически.\n\n"
-        "<b>На следующем этапе подключим оплату "
-        "и автоматическую выдачу доступа.</b>"
+        f"<b>Стоимость: {tariff['price']} ₽</b>\n\n"
+        "Система оплаты пока находится на этапе подключения.\n\n"
+        "После подключения оплаты здесь будет кнопка оплаты, "
+        "а после успешной оплаты бот автоматически выдаст "
+        "купленный PDF и сохранит покупку в статистике."
     )
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="← Назад",
-                    callback_data=f"tariff_{tariff_key}_{profession_key}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🏠 Главное меню",
-                    callback_data="main_menu"
-                )
-            ]
+            [InlineKeyboardButton(text="← Назад", callback_data=f"tariff_{tariff_key}_{profession_key}")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
         ]
     )
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=keyboard
-    )
+    await callback.message.edit_text(text, reply_markup=keyboard)
 
 
 # =========================================================
@@ -658,13 +641,12 @@ async def buy_handler(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "search_system")
 async def search_system_handler(callback: CallbackQuery):
-
     await callback.answer()
 
     text = (
         "<b>📖 Система поиска клиентов</b>\n\n"
-        "Пошаговая система для фрилансера, которая поможет "
-        "организовать регулярный поиск новых клиентов.\n\n"
+        "Практическая система, которая помогает не просто находить "
+        "заказы, а выстраивать весь путь от первого поиска до оплаты.\n\n"
         "<b>Внутри:</b>\n\n"
         "1️⃣ Подготовка к поиску\n"
         "2️⃣ Где искать клиентов\n"
@@ -673,30 +655,38 @@ async def search_system_handler(callback: CallbackQuery):
         "5️⃣ Как презентовать свои услуги\n"
         "6️⃣ Как обсуждать стоимость\n"
         "7️⃣ Как работать с возражениями\n"
-        "8️⃣ Как доводить клиента до оплаты\n\n"
-        "Полную систему добавим отдельным материалом."
+        "8️⃣ Как доводить клиента до оплаты\n"
+        "9️⃣ Как вести свои соцсети, чтобы клиенты приходили сами\n\n"
+        "<b>Стоимость: 99 ₽</b>\n\n"
+        "После подключения оплаты здесь будет доступна покупка "
+        "и автоматическая выдача PDF."
     )
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👥 Посмотреть базы",
-                    callback_data="clients"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="← Главное меню",
-                    callback_data="main_menu"
-                )
-            ]
+            [InlineKeyboardButton(text="💳 Купить за 99 ₽", callback_data="buy_system")],
+            [InlineKeyboardButton(text="👥 Посмотреть базы", callback_data="clients")],
+            [InlineKeyboardButton(text="← Главное меню", callback_data="main_menu")]
         ]
     )
 
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+@dp.callback_query(F.data == "buy_system")
+async def buy_system_handler(callback: CallbackQuery):
+    await callback.answer()
+
     await callback.message.edit_text(
-        text,
-        reply_markup=keyboard
+        "<b>💳 Система поиска клиентов - 99 ₽</b>\n\n"
+        "Оплата будет подключена на следующем этапе.\n\n"
+        "После оплаты бот автоматически отправит PDF.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="← Назад", callback_data="search_system")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+            ]
+        )
     )
 
 
@@ -706,7 +696,6 @@ async def search_system_handler(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "free")
 async def free_handler(callback: CallbackQuery):
-
     await callback.answer()
 
     text = (
@@ -723,29 +712,25 @@ async def free_handler(callback: CallbackQuery):
         "• почему нельзя постоянно ждать входящие заявки\n"
         "• как организовать регулярный поиск\n"
         "• как постепенно увеличивать количество заказов\n\n"
-        "Полную бесплатную брошюру добавим позже."
+        "Бесплатный материал будет выдаваться прямо в боте."
     )
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👥 Посмотреть базы",
-                    callback_data="clients"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="← Главное меню",
-                    callback_data="main_menu"
-                )
-            ]
+            [InlineKeyboardButton(text="📖 Получить брошюру", callback_data="get_free")],
+            [InlineKeyboardButton(text="👥 Посмотреть базы", callback_data="clients")],
+            [InlineKeyboardButton(text="← Главное меню", callback_data="main_menu")]
         ]
     )
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=keyboard
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+@dp.callback_query(F.data == "get_free")
+async def get_free_handler(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        "📖 Бесплатная брошюра будет подключена после добавления её Telegram file_id."
     )
 
 
@@ -755,38 +740,38 @@ async def free_handler(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "purchases")
 async def purchases_handler(callback: CallbackQuery):
-
     await callback.answer()
 
-    text = (
-        "<b>🛍 Мои покупки</b>\n\n"
-        "Здесь будут отображаться все приобретенные "
-        "базы и доступы.\n\n"
-        "После подключения оплаты и системы выдачи доступа "
-        "ты сможешь открывать купленные базы прямо отсюда."
-    )
+    with closing(db_connect()) as conn:
+        rows = conn.execute("""
+            SELECT profession, tariff, amount, created_at
+            FROM purchases
+            WHERE user_id=? AND status='paid'
+            ORDER BY created_at DESC
+        """, (callback.from_user.id,)).fetchall()
+
+    if rows:
+        lines = ["<b>🛍 Мои покупки</b>\n"]
+        for row in rows:
+            lines.append(
+                f"• {row['profession']} - {row['tariff']} - {row['amount']} ₽"
+            )
+        text = "\n".join(lines)
+    else:
+        text = (
+            "<b>🛍 Мои покупки</b>\n\n"
+            "Пока у тебя нет оплаченных покупок.\n\n"
+            "После оплаты приобретенные базы будут отображаться здесь."
+        )
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👥 Выбрать базу",
-                    callback_data="clients"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="← Главное меню",
-                    callback_data="main_menu"
-                )
-            ]
+            [InlineKeyboardButton(text="👥 Выбрать базу", callback_data="clients")],
+            [InlineKeyboardButton(text="← Главное меню", callback_data="main_menu")]
         ]
     )
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=keyboard
-    )
+    await callback.message.edit_text(text, reply_markup=keyboard)
 
 
 # =========================================================
@@ -795,31 +780,194 @@ async def purchases_handler(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "support")
 async def support_handler(callback: CallbackQuery):
-
     await callback.answer()
 
+    support_mode.add(callback.from_user.id)
+
     text = (
-        "<b>💬 Поддержка</b>\n\n"
-        "Возник вопрос по оплате, доступу "
-        "или работе INKLAB?\n\n"
-        "Напиши в поддержку - мы поможем "
-        "разобраться с вопросом."
+        "<b>💬 Поддержка INKLAB</b>\n\n"
+        "Напиши сюда свой вопрос обычным сообщением.\n\n"
+        "Твоё сообщение будет передано администратору, "
+        "а ответ придёт прямо сюда в этот чат.\n\n"
+        "Можно спрашивать про оплату, доступ, базы или работу бота.\n\n"
+        "<b>Чтобы выйти из поддержки:</b> нажми «Главное меню»."
     )
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="← Главное меню",
-                    callback_data="main_menu"
-                )
-            ]
+            [InlineKeyboardButton(text="← Главное меню", callback_data="main_menu")]
         ]
     )
 
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+@dp.message(F.text)
+async def support_message_handler(message: Message):
+    # Сначала регистрируем любого пользователя, который написал боту.
+    register_user(message.from_user)
+
+    # Сообщения администратора обрабатываются отдельно ниже.
+    if is_admin(message.from_user):
+        return
+
+    if message.from_user.id not in support_mode:
+        return
+
+    username = f"@{message.from_user.username}" if message.from_user.username else "без username"
+    name = " ".join(filter(None, [message.from_user.first_name, message.from_user.last_name]))
+
+    admin_text = (
+        "💬 <b>Новое сообщение в поддержку</b>\n\n"
+        f"👤 <b>{name or 'Пользователь'}</b>\n"
+        f"🔗 {username}\n"
+        f"🆔 <code>{message.from_user.id}</code>\n\n"
+        f"{message.text}"
+    )
+
+    sent = await bot.send_message(
+        chat_id=callback_admin_id(),
+        text=admin_text
+    )
+
+    support_replies[sent.message_id] = message.from_user.id
+
+    await message.answer(
+        "✅ Сообщение отправлено в поддержку.\n\n"
+        "Ответ администратора придёт сюда."
+    )
+
+
+def callback_admin_id():
+    # Telegram Bot API не позволяет надежно отправить сообщение
+    # по username без предварительного chat_id. Поэтому для админки
+    # используется ADMIN_ID, который нужно указать в Render.
+    value = os.getenv("ADMIN_ID")
+    if not value:
+        raise RuntimeError(
+            "Для поддержки добавь в Render переменную ADMIN_ID "
+            "с числовым Telegram ID администратора."
+        )
+    return int(value)
+
+
+# =========================================================
+# ОТВЕТ АДМИНА ПОЛЬЗОВАТЕЛЮ
+# =========================================================
+
+@dp.message(F.reply_to_message)
+async def admin_reply_handler(message: Message):
+    if not is_admin(message.from_user):
+        return
+
+    replied = message.reply_to_message
+    user_id = support_replies.get(replied.message_id)
+
+    if not user_id:
+        # Также пытаемся найти ID прямо в сообщении поддержки.
+        import re
+        match = re.search(r"🆔\s*<code>(\d+)</code>", replied.text or "")
+        if match:
+            user_id = int(match.group(1))
+
+    if not user_id:
+        await message.answer(
+            "Не удалось определить пользователя. "
+            "Ответь именно на сообщение из поддержки."
+        )
+        return
+
+    if message.text:
+        await bot.send_message(
+            chat_id=user_id,
+            text=f"💬 <b>Ответ поддержки:</b>\n\n{message.text}"
+        )
+        await message.answer("✅ Ответ отправлен пользователю.")
+    elif message.caption:
+        await bot.send_message(
+            chat_id=user_id,
+            text=f"💬 <b>Ответ поддержки:</b>\n\n{message.caption}"
+        )
+        await message.answer("✅ Ответ отправлен пользователю.")
+    else:
+        await message.answer(
+            "Пока поддержка через ответ обрабатывает только текстовые сообщения."
+        )
+
+
+# =========================================================
+# АДМИН
+# =========================================================
+
+@dp.message(F.text == "/admin")
+async def admin_command(message: Message):
+    register_user(message.from_user)
+
+    if not is_admin(message.from_user):
+        await message.answer("⛔ Доступ запрещен.")
+        return
+
+    await message.answer(
+        admin_stats_text(),
+        reply_markup=admin_menu()
+    )
+
+
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats_handler(callback: CallbackQuery):
+    if not is_admin(callback.from_user):
+        await callback.answer("⛔ Доступ запрещен.", show_alert=True)
+        return
+
+    await callback.answer()
     await callback.message.edit_text(
-        text,
-        reply_markup=keyboard
+        admin_stats_text(),
+        reply_markup=admin_menu()
+    )
+
+
+@dp.callback_query(F.data == "admin_users")
+async def admin_users_handler(callback: CallbackQuery):
+    if not is_admin(callback.from_user):
+        await callback.answer("⛔ Доступ запрещен.", show_alert=True)
+        return
+
+    await callback.answer()
+
+    rows = get_users(100)
+
+    if not rows:
+        text = "<b>👥 Пользователи</b>\n\nПока никто не заходил."
+    else:
+        lines = ["<b>👥 Пользователи</b>\n"]
+        for i, row in enumerate(rows, 1):
+            name = " ".join(filter(None, [row["first_name"], row["last_name"]]))
+            username = f"@{row['username']}" if row["username"] else "без username"
+            lines.append(
+                f"{i}. {name or 'Без имени'} | {username}\n"
+                f"ID: <code>{row['user_id']}</code>\n"
+                f"Последний вход: {row['last_seen']}"
+            )
+        text = "\n\n".join(lines)
+
+    await callback.message.edit_text(text, reply_markup=admin_menu())
+
+
+@dp.callback_query(F.data == "admin_support")
+async def admin_support_handler(callback: CallbackQuery):
+    if not is_admin(callback.from_user):
+        await callback.answer("⛔ Доступ запрещен.", show_alert=True)
+        return
+
+    await callback.answer()
+    support_mode.add(callback.from_user.id)
+
+    await callback.message.answer(
+        "<b>💬 Режим поддержки</b>\n\n"
+        "Когда пользователь напишет в поддержку, "
+        "бот пришлёт его сообщение сюда.\n\n"
+        "<b>Чтобы ответить:</b> просто нажми «Ответить» "
+        "на сообщении пользователя и напиши текст."
     )
 
 
@@ -829,8 +977,10 @@ async def support_handler(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "main_menu")
 async def main_menu_handler(callback: CallbackQuery):
-
     await callback.answer()
+
+    # Если пользователь вернулся в меню - выключаем режим поддержки.
+    support_mode.discard(callback.from_user.id)
 
     text = (
         "<b>INKLAB - База клиентов</b>\n\n"
@@ -839,10 +989,7 @@ async def main_menu_handler(callback: CallbackQuery):
         "<b>Выбери нужный раздел 👇</b>"
     )
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=main_menu()
-    )
+    await callback.message.edit_text(text, reply_markup=main_menu())
 
 
 # =========================================================
@@ -850,10 +997,7 @@ async def main_menu_handler(callback: CallbackQuery):
 # =========================================================
 
 async def health_check(request):
-
-    return web.Response(
-        text="INKLAB OK"
-    )
+    return web.Response(text="INKLAB OK")
 
 
 # =========================================================
@@ -861,26 +1005,20 @@ async def health_check(request):
 # =========================================================
 
 async def on_startup():
+    init_db()
 
     await bot.set_webhook(
         url=WEBHOOK_URL,
         drop_pending_updates=True
     )
 
-    logging.info(
-        f"Webhook установлен: {WEBHOOK_URL}"
-    )
+    logging.info(f"Webhook установлен: {WEBHOOK_URL}")
 
 
 async def on_shutdown():
-
     await bot.delete_webhook()
-
     await bot.session.close()
-
-    logging.info(
-        "Webhook удален"
-    )
+    logging.info("Webhook удален")
 
 
 # =========================================================
@@ -888,23 +1026,17 @@ async def on_shutdown():
 # =========================================================
 
 async def main():
-
     logging.basicConfig(
         level=logging.INFO,
         stream=sys.stdout
     )
 
+    init_db()
+
     app = web.Application()
 
-    app.router.add_get(
-        "/",
-        health_check
-    )
-
-    app.router.add_get(
-        "/health",
-        health_check
-    )
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
 
     webhook_handler = SimpleRequestHandler(
         dispatcher=dp,
@@ -917,13 +1049,8 @@ async def main():
         path=WEBHOOK_PATH
     )
 
-    dp.startup.register(
-        on_startup
-    )
-
-    dp.shutdown.register(
-        on_shutdown
-    )
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
 
     setup_application(
         app,
@@ -932,7 +1059,6 @@ async def main():
     )
 
     runner = web.AppRunner(app)
-
     await runner.setup()
 
     site = web.TCPSite(
@@ -943,9 +1069,7 @@ async def main():
 
     await site.start()
 
-    logging.info(
-        f"INKLAB запущен на порту {PORT}"
-    )
+    logging.info(f"INKLAB запущен на порту {PORT}")
 
     await asyncio.Event().wait()
 
