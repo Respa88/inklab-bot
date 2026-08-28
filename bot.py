@@ -11,8 +11,9 @@ from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import (
     Message,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
 from aiogram.webhook.aiohttp_server import (
     SimpleRequestHandler,
@@ -59,27 +60,136 @@ bot = Bot(
 # ГЛАВНОЕ МЕНЮ
 # ==========================================
 
-def main_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
+def main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
-                KeyboardButton(text="👥 База клиентов"),
+                InlineKeyboardButton(
+                    text="👥 База клиентов",
+                    callback_data="clients"
+                )
             ],
             [
-                KeyboardButton(text="📖 Система поиска клиентов"),
+                InlineKeyboardButton(
+                    text="📖 Система поиска клиентов",
+                    callback_data="search_system"
+                )
             ],
             [
-                KeyboardButton(text="🎁 Бесплатно"),
+                InlineKeyboardButton(
+                    text="🎁 Бесплатно",
+                    callback_data="free"
+                )
             ],
             [
-                KeyboardButton(text="🛍 Мои покупки"),
+                InlineKeyboardButton(
+                    text="🛍 Мои покупки",
+                    callback_data="purchases"
+                )
             ],
             [
-                KeyboardButton(text="💬 Поддержка"),
+                InlineKeyboardButton(
+                    text="💬 Поддержка",
+                    callback_data="support"
+                )
             ],
-        ],
-        resize_keyboard=True,
+        ]
     )
+
+
+# ==========================================
+# МЕНЮ ПРОФЕССИЙ
+# ==========================================
+
+def professions_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🎨 Дизайнер",
+                    callback_data="profession_designer"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📱 SMM",
+                    callback_data="profession_smm"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎯 Таргетолог",
+                    callback_data="profession_target"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📈 Маркетолог",
+                    callback_data="profession_marketer"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✍️ Копирайтер",
+                    callback_data="profession_copywriter"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="← Главное меню",
+                    callback_data="main_menu"
+                )
+            ],
+        ]
+    )
+
+
+# ==========================================
+# МЕНЮ ТАРИФОВ
+# ==========================================
+
+def tariffs_menu(profession: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🟢 START",
+                    callback_data=f"tariff_start_{profession}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔵 PRO",
+                    callback_data=f"tariff_pro_{profession}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🟣 MAX",
+                    callback_data=f"tariff_max_{profession}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="← К направлениям",
+                    callback_data="clients"
+                )
+            ],
+        ]
+    )
+
+
+# ==========================================
+# НАЗВАНИЯ ПРОФЕССИЙ
+# ==========================================
+
+PROFESSIONS = {
+    "designer": "🎨 Дизайнер",
+    "smm": "📱 SMM",
+    "target": "🎯 Таргетолог",
+    "marketer": "📈 Маркетолог",
+    "copywriter": "✍️ Копирайтер",
+}
 
 
 # ==========================================
@@ -107,37 +217,19 @@ async def start_handler(message: Message):
 # БАЗА КЛИЕНТОВ
 # ==========================================
 
-@dp.message(F.text == "👥 База клиентов")
-async def clients_base_handler(message: Message):
+@dp.callback_query(F.data == "clients")
+async def clients_handler(callback: CallbackQuery):
+
+    await callback.answer()
 
     text = (
         "<b>👥 База клиентов</b>\n\n"
         "Выберите своё направление:"
     )
 
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="🎨 Дизайнер"),
-                KeyboardButton(text="📱 SMM"),
-            ],
-            [
-                KeyboardButton(text="🎯 Таргетолог"),
-                KeyboardButton(text="📈 Маркетолог"),
-            ],
-            [
-                KeyboardButton(text="✍️ Копирайтер"),
-            ],
-            [
-                KeyboardButton(text="◀️ Главное меню"),
-            ],
-        ],
-        resize_keyboard=True,
-    )
-
-    await message.answer(
+    await callback.message.edit_text(
         text,
-        reply_markup=keyboard
+        reply_markup=professions_menu()
     )
 
 
@@ -145,41 +237,83 @@ async def clients_base_handler(message: Message):
 # ВЫБОР ПРОФЕССИИ
 # ==========================================
 
-@dp.message(
-    F.text.in_({
-        "🎨 Дизайнер",
-        "📱 SMM",
-        "🎯 Таргетолог",
-        "📈 Маркетолог",
-        "✍️ Копирайтер",
-    })
-)
-async def profession_handler(message: Message):
+@dp.callback_query(F.data.startswith("profession_"))
+async def profession_handler(callback: CallbackQuery):
 
-    profession = message.text
+    await callback.answer()
+
+    profession_key = callback.data.replace(
+        "profession_",
+        ""
+    )
+
+    profession = PROFESSIONS.get(
+        profession_key,
+        "Профессия"
+    )
 
     text = (
         f"<b>{profession}</b>\n\n"
         "Выберите тариф с базой клиентов:"
     )
 
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="🟢 START"),
-                KeyboardButton(text="🔵 PRO"),
-            ],
-            [
-                KeyboardButton(text="🟣 MAX"),
-            ],
-            [
-                KeyboardButton(text="◀️ К направлениям"),
-            ],
-        ],
-        resize_keyboard=True,
+    await callback.message.edit_text(
+        text,
+        reply_markup=tariffs_menu(profession_key)
     )
 
-    await message.answer(
+
+# ==========================================
+# ТАРИФЫ
+# ==========================================
+
+@dp.callback_query(F.data.startswith("tariff_"))
+async def tariff_handler(callback: CallbackQuery):
+
+    await callback.answer()
+
+    parts = callback.data.split("_")
+
+    tariff = parts[1]
+    profession_key = parts[2]
+
+    profession = PROFESSIONS.get(
+        profession_key,
+        "Профессия"
+    )
+
+    tariff_name = tariff.upper()
+
+    text = (
+        f"<b>{profession} — {tariff_name}</b>\n\n"
+        "Здесь будет описание тарифа.\n\n"
+        "Внутри:\n"
+        "• клиентская база\n"
+        "• источники заказов\n"
+        "• полезные материалы\n\n"
+        "<b>Стоимость:</b> скоро\n\n"
+        "После подключения оплаты здесь появится "
+        "кнопка покупки."
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💳 Купить",
+                    callback_data=f"buy_{tariff}_{profession_key}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="← К тарифам",
+                    callback_data=f"profession_{profession_key}"
+                )
+            ],
+        ]
+    )
+
+    await callback.message.edit_text(
         text,
         reply_markup=keyboard
     )
@@ -189,12 +323,14 @@ async def profession_handler(message: Message):
 # СИСТЕМА ПОИСКА КЛИЕНТОВ
 # ==========================================
 
-@dp.message(F.text == "📖 Система поиска клиентов")
-async def search_system_handler(message: Message):
+@dp.callback_query(F.data == "search_system")
+async def search_system_handler(callback: CallbackQuery):
+
+    await callback.answer()
 
     text = (
         "<b>📖 Система поиска клиентов</b>\n\n"
-        "Здесь будет пошаговая система:\n\n"
+        "Пошаговая система поиска клиентов:\n\n"
         "1. Где искать клиентов\n"
         "2. Как находить подходящие заказы\n"
         "3. Как написать первое сообщение\n"
@@ -202,18 +338,34 @@ async def search_system_handler(message: Message):
         "5. Как обсуждать стоимость\n"
         "6. Как работать с возражениями\n"
         "7. Как закрывать клиента на оплату\n\n"
-        "Полная система скоро будет доступна."
+        "Полная система будет добавлена позже."
     )
 
-    await message.answer(text)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="← Главное меню",
+                    callback_data="main_menu"
+                )
+            ]
+        ]
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=keyboard
+    )
 
 
 # ==========================================
 # БЕСПЛАТНО
 # ==========================================
 
-@dp.message(F.text == "🎁 Бесплатно")
-async def free_handler(message: Message):
+@dp.callback_query(F.data == "free")
+async def free_handler(callback: CallbackQuery):
+
+    await callback.answer()
 
     text = (
         "<b>🎁 Бесплатно</b>\n\n"
@@ -225,64 +377,159 @@ async def free_handler(message: Message):
         "• где искать первых клиентов\n"
         "• зачем нужна клиентская база\n"
         "• как получать больше заказов\n\n"
-        "Полная бесплатная версия скоро будет доступна."
+        "Полная бесплатная версия будет добавлена позже."
     )
 
-    await message.answer(text)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="← Главное меню",
+                    callback_data="main_menu"
+                )
+            ]
+        ]
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=keyboard
+    )
 
 
 # ==========================================
 # МОИ ПОКУПКИ
 # ==========================================
 
-@dp.message(F.text == "🛍 Мои покупки")
-async def purchases_handler(message: Message):
+@dp.callback_query(F.data == "purchases")
+async def purchases_handler(callback: CallbackQuery):
+
+    await callback.answer()
 
     text = (
         "<b>🛍 Мои покупки</b>\n\n"
         "У вас пока нет активных покупок.\n\n"
-        "Выберите направление в разделе "
-        "«База клиентов», чтобы посмотреть тарифы."
+        "После покупки ваши базы будут "
+        "отображаться здесь."
     )
 
-    await message.answer(text)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👥 Выбрать базу",
+                    callback_data="clients"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="← Главное меню",
+                    callback_data="main_menu"
+                )
+            ],
+        ]
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=keyboard
+    )
 
 
 # ==========================================
 # ПОДДЕРЖКА
 # ==========================================
 
-@dp.message(F.text == "💬 Поддержка")
-async def support_handler(message: Message):
+@dp.callback_query(F.data == "support")
+async def support_handler(callback: CallbackQuery):
+
+    await callback.answer()
 
     text = (
         "<b>💬 Поддержка</b>\n\n"
-        "Если возник вопрос по оплате, "
+        "Если у вас возник вопрос по оплате, "
         "доступу или работе бота — напишите нам.\n\n"
-        "Поддержка скоро будет подключена."
+        "Контакт поддержки будет добавлен позже."
     )
 
-    await message.answer(text)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="← Главное меню",
+                    callback_data="main_menu"
+                )
+            ]
+        ]
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=keyboard
+    )
 
 
 # ==========================================
-# НАВИГАЦИЯ
+# ГЛАВНОЕ МЕНЮ
 # ==========================================
 
-@dp.message(F.text == "◀️ Главное меню")
-async def back_to_main_handler(message: Message):
+@dp.callback_query(F.data == "main_menu")
+async def main_menu_handler(callback: CallbackQuery):
 
-    await message.answer(
+    await callback.answer()
+
+    text = (
         "<b>INKLAB — База клиентов</b>\n\n"
-        "Выберите нужный раздел:",
+        "Находи клиентов. Получай заказы.\n\n"
+        "Готовые клиентские базы для "
+        "фрилансеров разных направлений.\n\n"
+        "Выбери нужный раздел:"
+    )
+
+    await callback.message.edit_text(
+        text,
         reply_markup=main_menu()
     )
 
 
-@dp.message(F.text == "◀️ К направлениям")
-async def back_to_professions_handler(message: Message):
+# ==========================================
+# ПОКУПКА — ПОКА ЗАГЛУШКА
+# ==========================================
 
-    await clients_base_handler(message)
+@dp.callback_query(F.data.startswith("buy_"))
+async def buy_handler(callback: CallbackQuery):
+
+    await callback.answer()
+
+    text = (
+        "<b>💳 Покупка</b>\n\n"
+        "Система оплаты будет подключена "
+        "на следующем этапе.\n\n"
+        "После подключения оплаты здесь "
+        "появится безопасная форма покупки."
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="← Назад",
+                    callback_data="clients"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏠 Главное меню",
+                    callback_data="main_menu"
+                )
+            ],
+        ]
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=keyboard
+    )
 
 
 # ==========================================
@@ -331,11 +578,9 @@ async def main():
 
     app = web.Application()
 
-    # Проверка работоспособности Render
     app.router.add_get("/", health_check)
     app.router.add_get("/health", health_check)
 
-    # Telegram webhook
     webhook_handler = SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
@@ -347,7 +592,6 @@ async def main():
         path=WEBHOOK_PATH,
     )
 
-    # Startup / Shutdown
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
@@ -356,8 +600,6 @@ async def main():
         dp,
         bot=bot,
     )
-
-    logging.info("INKLAB запускается...")
 
     runner = web.AppRunner(app)
 
@@ -372,10 +614,9 @@ async def main():
     await site.start()
 
     logging.info(
-        f"Web server запущен на порту {PORT}"
+        f"INKLAB Web Service запущен на порту {PORT}"
     )
 
-    # Не даём процессу завершиться
     await asyncio.Event().wait()
 
 
