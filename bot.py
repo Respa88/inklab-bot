@@ -45,6 +45,45 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WELCOME_IMAGE = os.path.join(BASE_DIR, "inklab_welcome.png")
 CLIENTS_IMAGE = os.path.join(BASE_DIR, "inklab_clients.png")
 
+PDF_DIR = BASE_DIR
+
+# Все PDF, которые лежат в корне репозитория GitHub/Render.
+PDF_FILES = {
+    # Платные базы: профессия -> тариф -> PDF
+    "designer": {
+        "start": os.path.join(PDF_DIR, "INKLAB_DESIGNER_START_199.pdf"),
+        "pro": os.path.join(PDF_DIR, "INKLAB_DESIGNER_PRO_349.pdf"),
+        "max": os.path.join(PDF_DIR, "INKLAB_DESIGNER_MAX_890.pdf"),
+    },
+    "smm": {
+        "start": os.path.join(PDF_DIR, "INKLAB_SMM_START_199.pdf"),
+        "pro": os.path.join(PDF_DIR, "INKLAB_SMM_PRO_349.pdf"),
+        "max": os.path.join(PDF_DIR, "INKLAB_SMM_MAX_890.pdf"),
+    },
+    "target": {
+        "start": os.path.join(PDF_DIR, "INKLAB_TARGETOLOG_START_199.pdf"),
+        "pro": os.path.join(PDF_DIR, "INKLAB_TARGETOLOG_PRO_349.pdf"),
+        "max": os.path.join(PDF_DIR, "INKLAB_TARGETOLOG_MAX_890.pdf"),
+    },
+    "marketer": {
+        "start": os.path.join(PDF_DIR, "INKLAB_MARKETER_START_199.pdf"),
+        "pro": os.path.join(PDF_DIR, "INKLAB_MARKETER_PRO_349.pdf"),
+        "max": os.path.join(PDF_DIR, "INKLAB_MARKETER_MAX_890.pdf"),
+    },
+    "copywriter": {
+        "start": os.path.join(PDF_DIR, "INKLAB_COPYWRITER_START_199.pdf"),
+        "pro": os.path.join(PDF_DIR, "INKLAB_COPYWRITER_PRO_349.pdf"),
+        "max": os.path.join(PDF_DIR, "INKLAB_COPYWRITER_MAX_890.pdf"),
+    },
+
+    # Бесплатная брошюра.
+    "free": os.path.join(PDF_DIR, "INKLAB_FREE_GUIDE.pdf"),
+
+    # Отдельный цифровой продукт за 99 ₽.
+    "search_system": os.path.join(PDF_DIR, "INKLAB_SEARCH_SYSTEM_99.pdf"),
+}
+
+
 
 def log_image_status():
     for label, path in (("WELCOME", WELCOME_IMAGE), ("CLIENTS", CLIENTS_IMAGE)):
@@ -52,6 +91,91 @@ def log_image_status():
             logging.info("INKLAB image %s found: %s", label, path)
         else:
             logging.error("INKLAB image %s NOT FOUND: %s", label, path)
+
+
+def log_pdf_status():
+    """Проверяет наличие всех PDF и пишет результат в логи Render."""
+    for key, value in PDF_FILES.items():
+        if isinstance(value, dict):
+            for tariff_key, path in value.items():
+                if os.path.isfile(path):
+                    logging.info(
+                        "INKLAB PDF found: %s/%s -> %s",
+                        key,
+                        tariff_key,
+                        path,
+                    )
+                else:
+                    logging.error(
+                        "INKLAB PDF NOT FOUND: %s/%s -> %s",
+                        key,
+                        tariff_key,
+                        path,
+                    )
+        else:
+            if os.path.isfile(value):
+                logging.info("INKLAB PDF found: %s -> %s", key, value)
+            else:
+                logging.error("INKLAB PDF NOT FOUND: %s -> %s", key, value)
+
+
+async def send_pdf_file(chat_id: int, pdf_path: str, caption: str):
+    """Отправляет PDF из репозитория пользователю."""
+    if not os.path.isfile(pdf_path):
+        logging.error("PDF file not found: %s", pdf_path)
+        await bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Не удалось найти файл. Мы уже разбираемся с проблемой."
+        )
+        return False
+
+    await bot.send_document(
+        chat_id=chat_id,
+        document=FSInputFile(pdf_path),
+        caption=caption,
+    )
+    return True
+
+
+def get_tariff_pdf_path(profession_key: str, tariff_key: str):
+    """Возвращает путь к PDF конкретной профессии и тарифа."""
+    profession_files = PDF_FILES.get(profession_key)
+    if not isinstance(profession_files, dict):
+        return None
+    return profession_files.get(tariff_key)
+
+
+async def send_tariff_pdf(user_id: int, profession_key: str, tariff_key: str):
+    """
+    Выдаёт купленный PDF.
+
+    Эту функцию вызываем после подтверждения успешной оплаты.
+    Она уже готова для всех 15 платных баз.
+    """
+    profession = PROFESSIONS.get(profession_key)
+    tariff = TARIFFS.get(tariff_key)
+    pdf_path = get_tariff_pdf_path(profession_key, tariff_key)
+
+    if not profession or not tariff or not pdf_path:
+        logging.error(
+            "Unknown PDF mapping: profession=%s tariff=%s",
+            profession_key,
+            tariff_key,
+        )
+        await bot.send_message(
+            chat_id=user_id,
+            text="⚠️ Не удалось определить купленную базу."
+        )
+        return False
+
+    return await send_pdf_file(
+        chat_id=user_id,
+        pdf_path=pdf_path,
+        caption=(
+            f"📦 <b>{profession['name']} — {tariff['name']}</b>\n\n"
+            "Твоя база готова. Приятной работы!"
+        ),
+    )
 
 
 async def send_menu_with_image(message: Message, image_path: str, caption: str, keyboard):
@@ -671,6 +795,10 @@ async def tariff_handler(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("buy_"))
 async def buy_handler(callback: CallbackQuery):
+    # Здесь сейчас находится экран покупки.
+    # После подключения YooKassa успешный payment callback должен:
+    # 1. записать покупку в purchases;
+    # 2. вызвать await send_tariff_pdf(user_id, profession_key, tariff_key).
     await callback.answer()
 
     parts = callback.data.split("_")
@@ -802,8 +930,15 @@ async def free_handler(callback: CallbackQuery):
 @dp.callback_query(F.data == "get_free")
 async def get_free_handler(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.answer(
-        "📖 Бесплатная брошюра будет подключена после добавления её Telegram file_id."
+
+    await send_pdf_file(
+        chat_id=callback.from_user.id,
+        pdf_path=PDF_FILES["free"],
+        caption=(
+            "🎁 <b>Бесплатный путеводитель для фрилансера</b>\n\n"
+            "Держи PDF. Внутри — основы заработка на фрилансе "
+            "и система регулярного поиска клиентов."
+        ),
     )
 
 
@@ -1103,6 +1238,7 @@ async def health_check(request):
 async def on_startup():
     init_db()
     log_image_status()
+    log_pdf_status()
 
     await bot.set_webhook(
         url=WEBHOOK_URL,
