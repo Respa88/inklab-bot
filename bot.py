@@ -8,7 +8,9 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import FSInputFile
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -38,6 +40,67 @@ WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
 
 PORT = int(os.getenv("PORT", "10000"))
 
+# Пути к картинкам внутри репозитория GitHub/Render.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+WELCOME_IMAGE = os.path.join(BASE_DIR, "inklab_welcome.png")
+CLIENTS_IMAGE = os.path.join(BASE_DIR, "inklab_clients.png")
+
+
+def log_image_status():
+    for label, path in (("WELCOME", WELCOME_IMAGE), ("CLIENTS", CLIENTS_IMAGE)):
+        if os.path.isfile(path):
+            logging.info("INKLAB image %s found: %s", label, path)
+        else:
+            logging.error("INKLAB image %s NOT FOUND: %s", label, path)
+
+
+async def send_menu_with_image(message: Message, image_path: str, caption: str, keyboard):
+    """Отправляет баннер и текст одним Telegram-сообщением."""
+    if os.path.isfile(image_path):
+        return await message.answer_photo(
+            photo=FSInputFile(image_path),
+            caption=caption,
+            reply_markup=keyboard,
+        )
+
+    logging.error("Не удалось отправить изображение: %s", image_path)
+    return await message.answer(caption, reply_markup=keyboard)
+
+
+async def replace_callback_with_text(callback: CallbackQuery, text: str, keyboard):
+    """Заменяет текущую страницу текстом. Работает и если текущая страница была фото."""
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except TelegramBadRequest:
+        try:
+            await callback.message.delete()
+        except TelegramBadRequest:
+            pass
+        await callback.message.answer(text, reply_markup=keyboard)
+
+
+async def replace_callback_with_image(callback: CallbackQuery, image_path: str, caption: str, keyboard):
+    """Заменяет текущую страницу баннером с подписью и кнопками."""
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
+    if os.path.isfile(image_path):
+        await bot.send_photo(
+            chat_id=callback.from_user.id,
+            photo=FSInputFile(image_path),
+            caption=caption,
+            reply_markup=keyboard,
+        )
+    else:
+        logging.error("Не удалось отправить изображение: %s", image_path)
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text=caption,
+            reply_markup=keyboard,
+        )
+
+
 
 # =========================================================
 # БОТ
@@ -51,7 +114,9 @@ from contextlib import closing
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import FSInputFile
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -486,7 +551,7 @@ async def start_handler(message: Message):
         "<b>Выбери нужный раздел 👇</b>"
     )
 
-    await message.answer(text, reply_markup=main_menu())
+    await send_menu_with_image(message, WELCOME_IMAGE, text, main_menu())
 
 
 # =========================================================
@@ -516,7 +581,7 @@ async def clients_handler(callback: CallbackQuery):
         "информацию о пользе базы, а затем сможешь перейти к тарифам 👇"
     )
 
-    await callback.message.edit_text(text, reply_markup=professions_menu())
+    await replace_callback_with_image(callback, CLIENTS_IMAGE, text, professions_menu())
 
 
 # =========================================================
@@ -533,9 +598,10 @@ async def profession_handler(callback: CallbackQuery):
     if not profession:
         return
 
-    await callback.message.edit_text(
+    await replace_callback_with_text(
+        callback,
         profession["intro"],
-        reply_markup=profession_intro_menu(profession_key)
+        profession_intro_menu(profession_key)
     )
 
 
@@ -562,7 +628,7 @@ async def tariffs_handler(callback: CallbackQuery):
         "инструментов ты получаешь."
     )
 
-    await callback.message.edit_text(text, reply_markup=tariffs_menu(profession_key))
+    await replace_callback_with_text(callback, text, tariffs_menu(profession_key))
 
 
 # =========================================================
@@ -592,9 +658,10 @@ async def tariff_handler(callback: CallbackQuery):
         f"<b>Стоимость: {tariff['price']} ₽</b>"
     )
 
-    await callback.message.edit_text(
+    await replace_callback_with_text(
+        callback,
         text,
-        reply_markup=tariff_detail_menu(tariff_key, profession_key)
+        tariff_detail_menu(tariff_key, profession_key)
     )
 
 
@@ -637,7 +704,7 @@ async def buy_handler(callback: CallbackQuery):
         ]
     )
 
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    await replace_callback_with_text(callback, text, keyboard)
 
 
 # =========================================================
@@ -675,18 +742,19 @@ async def search_system_handler(callback: CallbackQuery):
         ]
     )
 
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    await replace_callback_with_text(callback, text, keyboard)
 
 
 @dp.callback_query(F.data == "buy_system")
 async def buy_system_handler(callback: CallbackQuery):
     await callback.answer()
 
-    await callback.message.edit_text(
+    await replace_callback_with_text(
+        callback,
         "<b>💳 Система поиска клиентов - 99 ₽</b>\n\n"
         "Оплата будет подключена на следующем этапе.\n\n"
         "После оплаты бот автоматически отправит PDF.",
-        reply_markup=InlineKeyboardMarkup(
+        InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="← Назад", callback_data="search_system")],
                 [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
@@ -728,7 +796,7 @@ async def free_handler(callback: CallbackQuery):
         ]
     )
 
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    await replace_callback_with_text(callback, text, keyboard)
 
 
 @dp.callback_query(F.data == "get_free")
@@ -776,7 +844,7 @@ async def purchases_handler(callback: CallbackQuery):
         ]
     )
 
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    await replace_callback_with_text(callback, text, keyboard)
 
 
 # =========================================================
@@ -804,7 +872,16 @@ async def support_handler(callback: CallbackQuery):
         ]
     )
 
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    await replace_callback_with_text(callback, text, keyboard)
+
+
+@dp.message(Command("admin"))
+async def admin_command_handler(message: Message):
+    register_user(message.from_user)
+    if not is_admin(message.from_user):
+        await message.answer("⛔ Доступ запрещен.")
+        return
+    await message.answer(admin_stats_text(), reply_markup=admin_menu())
 
 
 @dp.message(F.text)
@@ -812,20 +889,6 @@ async def support_message_handler(message: Message):
     global admin_reply_target
 
     register_user(message.from_user)
-
-    # /admin должен обрабатываться здесь раньше общего обработчика текста,
-    # иначе F.text перехватывает команду.
-    command = (message.text or "").strip().split()[0].lower() if message.text else ""
-    if command.split("@")[0] == "/admin":
-        if not is_admin(message.from_user):
-            await message.answer("⛔ Доступ запрещен.")
-            return
-
-        await message.answer(
-            admin_stats_text(),
-            reply_markup=admin_menu()
-        )
-        return
 
     # Администратор отвечает пользователю через кнопку "Ответить"
     # или обычной функцией Telegram "Ответить".
@@ -953,9 +1016,10 @@ async def admin_stats_handler(callback: CallbackQuery):
         return
 
     await callback.answer()
-    await callback.message.edit_text(
+    await replace_callback_with_text(
+        callback,
         admin_stats_text(),
-        reply_markup=admin_menu()
+        admin_menu()
     )
 
 
@@ -983,7 +1047,7 @@ async def admin_users_handler(callback: CallbackQuery):
             )
         text = "\n\n".join(lines)
 
-    await callback.message.edit_text(text, reply_markup=admin_menu())
+    await replace_callback_with_text(callback, text, admin_menu())
 
 
 @dp.callback_query(F.data == "admin_support")
@@ -1021,7 +1085,7 @@ async def main_menu_handler(callback: CallbackQuery):
         "<b>Выбери нужный раздел 👇</b>"
     )
 
-    await callback.message.edit_text(text, reply_markup=main_menu())
+    await replace_callback_with_image(callback, WELCOME_IMAGE, text, main_menu())
 
 
 # =========================================================
@@ -1038,6 +1102,7 @@ async def health_check(request):
 
 async def on_startup():
     init_db()
+    log_image_status()
 
     await bot.set_webhook(
         url=WEBHOOK_URL,
