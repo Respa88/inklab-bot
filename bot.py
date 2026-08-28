@@ -76,6 +76,7 @@ bot = Bot(
 
 DB_PATH = os.getenv("DB_PATH", "inklab.db")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "inklab1").lstrip("@").lower()
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or "0")
 
 def db_connect():
     conn = sqlite3.connect(DB_PATH)
@@ -151,10 +152,17 @@ def get_users(limit=100):
         """, (limit,)).fetchall()
 
 def is_admin(user):
+    if not user:
+        return False
+
+    # Основной способ проверки - числовой Telegram ID.
+    # Username оставляем как резервный вариант.
+    if ADMIN_ID and user.id == ADMIN_ID:
+        return True
+
     return bool(
-        user
-        and user.username
-        and user.username.lower() == ADMIN_USERNAME
+        user.username
+        and user.username.lower().lstrip("@") == ADMIN_USERNAME
     )
 
 
@@ -162,13 +170,15 @@ def is_admin(user):
 # ПОДДЕРЖКА
 # =========================================================
 
-# user_id администратора -> True, если он сейчас ожидает сообщение
-# от пользователя в режиме поддержки.
+# Пользователи, которые сейчас пишут в поддержку.
 support_mode = set()
 
 # message_id сообщения пользователя в админском чате -> user_id.
-# Это позволяет админу просто нажать "Ответить" на сообщение.
 support_replies = {}
+
+# user_id пользователя, которому администратор сейчас отвечает
+# через кнопку "Ответить".
+admin_reply_target = None
 
 
 # =========================================================
@@ -456,11 +466,6 @@ def admin_stats_text():
 async def start_handler(message: Message):
     register_user(message.from_user)
 
-    await message.answer(
-        "Меню обновлено.",
-        reply_markup=ReplyKeyboardRemove()
-    )
-
     text = (
         "<b>INKLAB - База клиентов</b>\n\n"
         "Рабочий инструмент для фрилансера, который хочет "
@@ -474,8 +479,8 @@ async def start_handler(message: Message):
         "• запросы на услуги\n"
         "• предложения о сотрудничестве\n"
         "• потенциальных клиентов\n\n"
-        "<b>Выбираешь направление → получаешь подходящую "
-        "базу → регулярно используешь ее для поиска.</b>\n\n"
+        "<b>Выбираешь направление -> получаешь подходящую "
+        "базу -> регулярно используешь ее для поиска.</b>\n\n"
         "INKLAB помогает сократить время на поиск источников "
         "и сделать поиск клиентов понятной частью твоей работы.\n\n"
         "<b>Выбери нужный раздел 👇</b>"
@@ -804,18 +809,62 @@ async def support_handler(callback: CallbackQuery):
 
 @dp.message(F.text)
 async def support_message_handler(message: Message):
-    # Сначала регистрируем любого пользователя, который написал боту.
+    global admin_reply_target
+
     register_user(message.from_user)
 
-    # Сообщения администратора обрабатываются отдельно ниже.
+    # /admin должен обрабатываться здесь раньше общего обработчика текста,
+    # иначе F.text перехватывает команду.
+    command = (message.text or "").strip().split()[0].lower() if message.text else ""
+    if command.split("@")[0] == "/admin":
+        if not is_admin(message.from_user):
+            await message.answer("⛔ Доступ запрещен.")
+            return
+
+        await message.answer(
+            admin_stats_text(),
+            reply_markup=admin_menu()
+        )
+        return
+
+    # Администратор отвечает пользователю через кнопку "Ответить"
+    # или обычной функцией Telegram "Ответить".
     if is_admin(message.from_user):
+        user_id = None
+
+        if message.reply_to_message:
+            replied = message.reply_to_message
+            user_id = support_replies.get(replied.message_id)
+
+            if not user_id:
+                import re
+                match = re.search(r"🆔\s*<code>(\d+)</code>", replied.text or "")
+                if match:
+                    user_id = int(match.group(1))
+
+        if not user_id and admin_reply_target:
+            user_id = admin_reply_target
+
+        if user_id:
+            await bot.send_message(
+                chat_id=user_id,
+                text=f"💬 <b>Ответ поддержки:</b>\n\n{message.text}"
+            )
+            admin_reply_target = None
+            await message.answer("✅ Ответ отправлен пользователю.")
         return
 
     if message.from_user.id not in support_mode:
         return
 
-    username = f"@{message.from_user.username}" if message.from_user.username else "без username"
-    name = " ".join(filter(None, [message.from_user.first_name, message.from_user.last_name]))
+    username = (
+        f"@{message.from_user.username}"
+        if message.from_user.username
+        else "без username"
+    )
+    name = " ".join(
+        filter(None, [message.from_user.first_name, message.from_user.last_name])
+    )
 
     admin_text = (
         "💬 <b>Новое сообщение в поддержку</b>\n\n"
@@ -825,9 +874,21 @@ async def support_message_handler(message: Message):
         f"{message.text}"
     )
 
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="↩️ Ответить",
+                    callback_data=f"support_reply_{message.from_user.id}"
+                )
+            ]
+        ]
+    )
+
     sent = await bot.send_message(
         chat_id=callback_admin_id(),
-        text=admin_text
+        text=admin_text,
+        reply_markup=keyboard
     )
 
     support_replies[sent.message_id] = message.from_user.id
@@ -855,63 +916,35 @@ def callback_admin_id():
 # ОТВЕТ АДМИНА ПОЛЬЗОВАТЕЛЮ
 # =========================================================
 
-@dp.message(F.reply_to_message)
-async def admin_reply_handler(message: Message):
-    if not is_admin(message.from_user):
+# =========================================================
+# БЫСТРЫЙ ОТВЕТ ИЗ ПОДДЕРЖКИ
+# =========================================================
+
+@dp.callback_query(F.data.startswith("support_reply_"))
+async def support_reply_button_handler(callback: CallbackQuery):
+    global admin_reply_target
+
+    if not is_admin(callback.from_user):
+        await callback.answer("⛔ Доступ запрещен.", show_alert=True)
         return
 
-    replied = message.reply_to_message
-    user_id = support_replies.get(replied.message_id)
-
-    if not user_id:
-        # Также пытаемся найти ID прямо в сообщении поддержки.
-        import re
-        match = re.search(r"🆔\s*<code>(\d+)</code>", replied.text or "")
-        if match:
-            user_id = int(match.group(1))
-
-    if not user_id:
-        await message.answer(
-            "Не удалось определить пользователя. "
-            "Ответь именно на сообщение из поддержки."
-        )
+    try:
+        user_id = int(callback.data.replace("support_reply_", ""))
+    except ValueError:
+        await callback.answer("Ошибка пользователя.", show_alert=True)
         return
 
-    if message.text:
-        await bot.send_message(
-            chat_id=user_id,
-            text=f"💬 <b>Ответ поддержки:</b>\n\n{message.text}"
-        )
-        await message.answer("✅ Ответ отправлен пользователю.")
-    elif message.caption:
-        await bot.send_message(
-            chat_id=user_id,
-            text=f"💬 <b>Ответ поддержки:</b>\n\n{message.caption}"
-        )
-        await message.answer("✅ Ответ отправлен пользователю.")
-    else:
-        await message.answer(
-            "Пока поддержка через ответ обрабатывает только текстовые сообщения."
-        )
+    admin_reply_target = user_id
+    await callback.answer("Теперь напиши ответ сообщением.")
+    await callback.message.answer(
+        "✍️ <b>Напиши ответ пользователю.</b>\n\n"
+        "Следующее текстовое сообщение будет отправлено ему."
+    )
 
 
 # =========================================================
 # АДМИН
 # =========================================================
-
-@dp.message(F.text == "/admin")
-async def admin_command(message: Message):
-    register_user(message.from_user)
-
-    if not is_admin(message.from_user):
-        await message.answer("⛔ Доступ запрещен.")
-        return
-
-    await message.answer(
-        admin_stats_text(),
-        reply_markup=admin_menu()
-    )
-
 
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats_handler(callback: CallbackQuery):
@@ -960,14 +993,13 @@ async def admin_support_handler(callback: CallbackQuery):
         return
 
     await callback.answer()
-    support_mode.add(callback.from_user.id)
-
     await callback.message.answer(
         "<b>💬 Режим поддержки</b>\n\n"
         "Когда пользователь напишет в поддержку, "
         "бот пришлёт его сообщение сюда.\n\n"
-        "<b>Чтобы ответить:</b> просто нажми «Ответить» "
-        "на сообщении пользователя и напиши текст."
+        "<b>Чтобы ответить:</b> нажми кнопку «↩️ Ответить» "
+        "под сообщением пользователя и напиши текст.\n\n"
+        "Также можно использовать обычную функцию Telegram «Ответить»."
     )
 
 
