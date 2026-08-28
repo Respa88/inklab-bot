@@ -192,23 +192,12 @@ async def send_menu_with_image(message: Message, image_path: str, caption: str, 
 
 
 async def replace_callback_with_text(callback: CallbackQuery, text: str, keyboard):
-    """Заменяет текущую страницу текстом. Работает и если текущая страница была фото."""
-    try:
-        await callback.message.edit_text(text, reply_markup=keyboard)
-    except TelegramBadRequest:
-        try:
-            await callback.message.delete()
-        except TelegramBadRequest:
-            pass
-        await callback.message.answer(text, reply_markup=keyboard)
+    """Отправляет новый раздел отдельным сообщением, не удаляя предыдущий."""
+    await callback.message.answer(text, reply_markup=keyboard)
 
 
 async def replace_callback_with_image(callback: CallbackQuery, image_path: str, caption: str, keyboard):
-    """Заменяет текущую страницу баннером с подписью и кнопками."""
-    try:
-        await callback.message.delete()
-    except TelegramBadRequest:
-        pass
+    """Отправляет новый баннер отдельным сообщением, не удаляя предыдущий."""
     if os.path.isfile(image_path):
         await bot.send_photo(
             chat_id=callback.from_user.id,
