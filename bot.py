@@ -45,45 +45,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WELCOME_IMAGE = os.path.join(BASE_DIR, "inklab_welcome.png")
 CLIENTS_IMAGE = os.path.join(BASE_DIR, "inklab_clients.png")
 
-PDF_DIR = BASE_DIR
-
-# Все PDF, которые лежат в корне репозитория GitHub/Render.
-PDF_FILES = {
-    # Платные базы: профессия -> тариф -> PDF
-    "designer": {
-        "start": os.path.join(PDF_DIR, "INKLAB_DESIGNER_START_199.pdf"),
-        "pro": os.path.join(PDF_DIR, "INKLAB_DESIGNER_PRO_349.pdf"),
-        "max": os.path.join(PDF_DIR, "INKLAB_DESIGNER_MAX_890.pdf"),
-    },
-    "smm": {
-        "start": os.path.join(PDF_DIR, "INKLAB_SMM_START_199.pdf"),
-        "pro": os.path.join(PDF_DIR, "INKLAB_SMM_PRO_349.pdf"),
-        "max": os.path.join(PDF_DIR, "INKLAB_SMM_MAX_890.pdf"),
-    },
-    "target": {
-        "start": os.path.join(PDF_DIR, "INKLAB_TARGETOLOG_START_199.pdf"),
-        "pro": os.path.join(PDF_DIR, "INKLAB_TARGETOLOG_PRO_349.pdf"),
-        "max": os.path.join(PDF_DIR, "INKLAB_TARGETOLOG_MAX_890.pdf"),
-    },
-    "marketer": {
-        "start": os.path.join(PDF_DIR, "INKLAB_MARKETER_START_199.pdf"),
-        "pro": os.path.join(PDF_DIR, "INKLAB_MARKETER_PRO_349.pdf"),
-        "max": os.path.join(PDF_DIR, "INKLAB_MARKETER_MAX_890.pdf"),
-    },
-    "copywriter": {
-        "start": os.path.join(PDF_DIR, "INKLAB_COPYWRITER_START_199.pdf"),
-        "pro": os.path.join(PDF_DIR, "INKLAB_COPYWRITER_PRO_349.pdf"),
-        "max": os.path.join(PDF_DIR, "INKLAB_COPYWRITER_MAX_890.pdf"),
-    },
-
-    # Бесплатная брошюра.
-    "free": os.path.join(PDF_DIR, "INKLAB_FREE_GUIDE.pdf"),
-
-    # Отдельный цифровой продукт за 99 ₽.
-    "search_system": os.path.join(PDF_DIR, "INKLAB_SEARCH_SYSTEM_99.pdf"),
-}
-
-
 
 def log_image_status():
     for label, path in (("WELCOME", WELCOME_IMAGE), ("CLIENTS", CLIENTS_IMAGE)):
@@ -91,91 +52,6 @@ def log_image_status():
             logging.info("INKLAB image %s found: %s", label, path)
         else:
             logging.error("INKLAB image %s NOT FOUND: %s", label, path)
-
-
-def log_pdf_status():
-    """Проверяет наличие всех PDF и пишет результат в логи Render."""
-    for key, value in PDF_FILES.items():
-        if isinstance(value, dict):
-            for tariff_key, path in value.items():
-                if os.path.isfile(path):
-                    logging.info(
-                        "INKLAB PDF found: %s/%s -> %s",
-                        key,
-                        tariff_key,
-                        path,
-                    )
-                else:
-                    logging.error(
-                        "INKLAB PDF NOT FOUND: %s/%s -> %s",
-                        key,
-                        tariff_key,
-                        path,
-                    )
-        else:
-            if os.path.isfile(value):
-                logging.info("INKLAB PDF found: %s -> %s", key, value)
-            else:
-                logging.error("INKLAB PDF NOT FOUND: %s -> %s", key, value)
-
-
-async def send_pdf_file(chat_id: int, pdf_path: str, caption: str):
-    """Отправляет PDF из репозитория пользователю."""
-    if not os.path.isfile(pdf_path):
-        logging.error("PDF file not found: %s", pdf_path)
-        await bot.send_message(
-            chat_id=chat_id,
-            text="⚠️ Не удалось найти файл. Мы уже разбираемся с проблемой."
-        )
-        return False
-
-    await bot.send_document(
-        chat_id=chat_id,
-        document=FSInputFile(pdf_path),
-        caption=caption,
-    )
-    return True
-
-
-def get_tariff_pdf_path(profession_key: str, tariff_key: str):
-    """Возвращает путь к PDF конкретной профессии и тарифа."""
-    profession_files = PDF_FILES.get(profession_key)
-    if not isinstance(profession_files, dict):
-        return None
-    return profession_files.get(tariff_key)
-
-
-async def send_tariff_pdf(user_id: int, profession_key: str, tariff_key: str):
-    """
-    Выдаёт купленный PDF.
-
-    Эту функцию вызываем после подтверждения успешной оплаты.
-    Она уже готова для всех 15 платных баз.
-    """
-    profession = PROFESSIONS.get(profession_key)
-    tariff = TARIFFS.get(tariff_key)
-    pdf_path = get_tariff_pdf_path(profession_key, tariff_key)
-
-    if not profession or not tariff or not pdf_path:
-        logging.error(
-            "Unknown PDF mapping: profession=%s tariff=%s",
-            profession_key,
-            tariff_key,
-        )
-        await bot.send_message(
-            chat_id=user_id,
-            text="⚠️ Не удалось определить купленную базу."
-        )
-        return False
-
-    return await send_pdf_file(
-        chat_id=user_id,
-        pdf_path=pdf_path,
-        caption=(
-            f"📦 <b>{profession['name']} — {tariff['name']}</b>\n\n"
-            "Твоя база готова. Приятной работы!"
-        ),
-    )
 
 
 async def send_menu_with_image(message: Message, image_path: str, caption: str, keyboard):
@@ -192,12 +68,23 @@ async def send_menu_with_image(message: Message, image_path: str, caption: str, 
 
 
 async def replace_callback_with_text(callback: CallbackQuery, text: str, keyboard):
-    """Отправляет новый раздел отдельным сообщением, не удаляя предыдущий."""
-    await callback.message.answer(text, reply_markup=keyboard)
+    """Заменяет текущую страницу текстом. Работает и если текущая страница была фото."""
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except TelegramBadRequest:
+        try:
+            await callback.message.delete()
+        except TelegramBadRequest:
+            pass
+        await callback.message.answer(text, reply_markup=keyboard)
 
 
 async def replace_callback_with_image(callback: CallbackQuery, image_path: str, caption: str, keyboard):
-    """Отправляет новый баннер отдельным сообщением, не удаляя предыдущий."""
+    """Заменяет текущую страницу баннером с подписью и кнопками."""
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
     if os.path.isfile(image_path):
         await bot.send_photo(
             chat_id=callback.from_user.id,
@@ -357,9 +244,6 @@ support_replies = {}
 # user_id пользователя, которому администратор сейчас отвечает
 # через кнопку "Ответить".
 admin_reply_target = None
-
-# Админская ручная выдача пакетов: admin_id -> target_user_id / '__WAITING_ID__'
-admin_grant_target = {}
 
 
 # =========================================================
@@ -624,34 +508,9 @@ def admin_menu():
             [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
             [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")],
             [InlineKeyboardButton(text="💬 Ответить пользователю", callback_data="admin_support")],
-            [InlineKeyboardButton(text="📦 Выдать базу", callback_data="grant_package")],
             [InlineKeyboardButton(text="← Главное меню", callback_data="main_menu")]
         ]
     )
-
-def admin_grant_profession_menu():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🎨 Дизайнер", callback_data="grant_profession_designer")],
-            [InlineKeyboardButton(text="📱 SMM", callback_data="grant_profession_smm")],
-            [InlineKeyboardButton(text="🎯 Таргетолог", callback_data="grant_profession_target")],
-            [InlineKeyboardButton(text="📈 Маркетолог", callback_data="grant_profession_marketer")],
-            [InlineKeyboardButton(text="✍️ Копирайтер", callback_data="grant_profession_copywriter")],
-            [InlineKeyboardButton(text="← Админ-панель", callback_data="admin_back")]
-        ]
-    )
-
-
-def admin_grant_tariff_menu(profession_key):
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⚡ START - 199 ₽", callback_data=f"grant_tariff_start_{profession_key}")],
-            [InlineKeyboardButton(text="🚀 PRO - 349 ₽", callback_data=f"grant_tariff_pro_{profession_key}")],
-            [InlineKeyboardButton(text="👑 MAX - 890 ₽", callback_data=f"grant_tariff_max_{profession_key}")],
-            [InlineKeyboardButton(text="← К профессиям", callback_data="grant_package")]
-        ]
-    )
-
 
 def admin_stats_text():
     users, paid, revenue = get_admin_stats()
@@ -812,10 +671,6 @@ async def tariff_handler(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("buy_"))
 async def buy_handler(callback: CallbackQuery):
-    # Здесь сейчас находится экран покупки.
-    # После подключения YooKassa успешный payment callback должен:
-    # 1. записать покупку в purchases;
-    # 2. вызвать await send_tariff_pdf(user_id, profession_key, tariff_key).
     await callback.answer()
 
     parts = callback.data.split("_")
@@ -947,15 +802,8 @@ async def free_handler(callback: CallbackQuery):
 @dp.callback_query(F.data == "get_free")
 async def get_free_handler(callback: CallbackQuery):
     await callback.answer()
-
-    await send_pdf_file(
-        chat_id=callback.from_user.id,
-        pdf_path=PDF_FILES["free"],
-        caption=(
-            "🎁 <b>Бесплатный путеводитель для фрилансера</b>\n\n"
-            "Держи PDF. Внутри — основы заработка на фрилансе "
-            "и система регулярного поиска клиентов."
-        ),
+    await callback.message.answer(
+        "📖 Бесплатная брошюра будет подключена после добавления её Telegram file_id."
     )
 
 
@@ -1041,24 +889,6 @@ async def support_message_handler(message: Message):
     global admin_reply_target
 
     register_user(message.from_user)
-
-    # Если админ сейчас выдаёт пакет — первое сообщение должно быть ID.
-    if is_admin(message.from_user) and admin_grant_target.get(message.from_user.id) == "__WAITING_ID__":
-        raw_id = message.text.strip()
-        if not raw_id.isdigit():
-            await message.answer(
-                "⚠️ ID должен состоять только из цифр.\n\n"
-                "Отправь числовой Telegram ID пользователя."
-            )
-            return
-
-        admin_grant_target[message.from_user.id] = int(raw_id)
-        await message.answer(
-            f"✅ Пользователь выбран: <code>{int(raw_id)}</code>\n\n"
-            "Теперь выбери профессию:",
-            reply_markup=admin_grant_profession_menu()
-        )
-        return
 
     # Администратор отвечает пользователю через кнопку "Ответить"
     # или обычной функцией Telegram "Ответить".
@@ -1179,144 +1009,6 @@ async def support_reply_button_handler(callback: CallbackQuery):
 # АДМИН
 # =========================================================
 
-
-@dp.callback_query(F.data == "grant_package")
-async def grant_package_handler(callback: CallbackQuery):
-    if not is_admin(callback.from_user):
-        await callback.answer("⛔ Доступ запрещен.", show_alert=True)
-        return
-
-    admin_grant_target[callback.from_user.id] = "__WAITING_ID__"
-    await callback.answer()
-    await callback.message.answer(
-        "<b>📦 Выдать базу</b>\n\n"
-        "Отправь сюда <b>числовой Telegram ID</b> пользователя.\n\n"
-        "Затем выберешь профессию и тариф. Бот отметит пакет как "
-        "оплаченный и отправит соответствующий PDF.\n\n"
-        "⚠️ Пользователь должен хотя бы один раз открыть бота "
-        "и нажать /start, иначе Telegram может не разрешить "
-        "отправить ему документ."
-    )
-
-
-@dp.callback_query(F.data == "admin_back")
-async def admin_back_handler(callback: CallbackQuery):
-    if not is_admin(callback.from_user):
-        await callback.answer("⛔ Доступ запрещен.", show_alert=True)
-        return
-
-    admin_grant_target.pop(callback.from_user.id, None)
-    await callback.answer()
-    await replace_callback_with_text(callback, admin_stats_text(), admin_menu())
-
-
-@dp.callback_query(F.data.startswith("grant_profession_"))
-async def grant_profession_handler(callback: CallbackQuery):
-    if not is_admin(callback.from_user):
-        await callback.answer("⛔ Доступ запрещен.", show_alert=True)
-        return
-
-    target_id = admin_grant_target.get(callback.from_user.id)
-    if not isinstance(target_id, int):
-        await callback.answer("Сначала укажи ID пользователя.", show_alert=True)
-        return
-
-    profession_key = callback.data.replace("grant_profession_", "")
-    profession = PROFESSIONS.get(profession_key)
-    if not profession:
-        await callback.answer("Неизвестная профессия.", show_alert=True)
-        return
-
-    await callback.answer()
-    await replace_callback_with_text(
-        callback,
-        f"<b>📦 Выдача базы</b>\n\n"
-        f"👤 ID: <code>{target_id}</code>\n"
-        f"📌 Профессия: {profession['name']}\n\n"
-        "Выбери тариф:",
-        admin_grant_tariff_menu(profession_key)
-    )
-
-
-@dp.callback_query(F.data.startswith("grant_tariff_"))
-async def grant_tariff_handler(callback: CallbackQuery):
-    if not is_admin(callback.from_user):
-        await callback.answer("⛔ Доступ запрещен.", show_alert=True)
-        return
-
-    target_id = admin_grant_target.get(callback.from_user.id)
-    if not isinstance(target_id, int):
-        await callback.answer("Сначала укажи ID пользователя.", show_alert=True)
-        return
-
-    parts = callback.data.split("_")
-    if len(parts) != 4:
-        await callback.answer("Ошибка пакета.", show_alert=True)
-        return
-
-    tariff_key = parts[2]
-    profession_key = parts[3]
-    tariff = TARIFFS.get(tariff_key)
-    profession = PROFESSIONS.get(profession_key)
-    pdf_path = get_tariff_pdf_path(profession_key, tariff_key)
-
-    if not tariff or not profession or not pdf_path:
-        await callback.answer("Пакет не найден.", show_alert=True)
-        return
-
-    # Выданный админом пакет появляется у пользователя в «Мои покупки».
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    try:
-        with closing(db_connect()) as conn:
-            conn.execute(
-                """
-                INSERT INTO purchases
-                    (user_id, profession, tariff, amount, status, created_at)
-                VALUES (?, ?, ?, ?, 'paid', ?)
-                """,
-                (target_id, profession["name"], tariff["name"], tariff["price"], now),
-            )
-            conn.commit()
-    except Exception:
-        logging.exception(
-            "Ошибка ручной выдачи: user_id=%s profession=%s tariff=%s",
-            target_id, profession_key, tariff_key
-        )
-        await callback.answer("Ошибка записи покупки.", show_alert=True)
-        return
-
-    await callback.answer("База выдана ✅")
-    sent = await send_tariff_pdf(target_id, profession_key, tariff_key)
-    admin_grant_target.pop(callback.from_user.id, None)
-
-    if sent:
-        result = (
-            "<b>✅ База выдана</b>\n\n"
-            f"👤 ID: <code>{target_id}</code>\n"
-            f"📌 {profession['name']}\n"
-            f"📦 {tariff['name']}\n\n"
-            "PDF отправлен пользователю."
-        )
-    else:
-        result = (
-            "<b>⚠️ База записана, но PDF не отправлен</b>\n\n"
-            f"👤 ID: <code>{target_id}</code>\n"
-            f"📌 {profession['name']}\n"
-            f"📦 {tariff['name']}\n\n"
-            "Проверь, что пользователь уже запускал бота и что PDF есть в репозитории."
-        )
-
-    await callback.message.answer(
-        result,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📦 Выдать ещё базу", callback_data="grant_package")],
-                [InlineKeyboardButton(text="← Админ-панель", callback_data="admin_back")]
-            ]
-        )
-    )
-
-
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats_handler(callback: CallbackQuery):
     if not is_admin(callback.from_user):
@@ -1411,7 +1103,6 @@ async def health_check(request):
 async def on_startup():
     init_db()
     log_image_status()
-    log_pdf_status()
 
     await bot.set_webhook(
         url=WEBHOOK_URL,
