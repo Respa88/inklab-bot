@@ -33,7 +33,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("Переменная окружения BOT_TOKEN не найдена")
 
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
 
 if not RENDER_URL:
     raise RuntimeError("RENDER_EXTERNAL_URL не найдена")
@@ -313,7 +313,7 @@ async def replace_callback_with_image(callback: CallbackQuery, image_path: str, 
 # БОТ
 # =========================================================
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import sqlite3
 from contextlib import closing
@@ -359,6 +359,7 @@ def db_connect():
     return conn
 
 def init_db():
+    """Создаёт таблицы и безопасно обновляет старую SQLite-базу."""
     with closing(db_connect()) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -370,6 +371,7 @@ def init_db():
                 last_seen TEXT NOT NULL
             )
         """)
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS purchases (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -378,9 +380,12 @@ def init_db():
                 tariff TEXT,
                 amount INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'paid',
+                source TEXT DEFAULT 'payment',
+                payment_id TEXT,
                 created_at TEXT NOT NULL
             )
         """)
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS payments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -391,10 +396,47 @@ def init_db():
                 tariff_key TEXT,
                 amount INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
+                delivery_status TEXT NOT NULL DEFAULT 'pending',
+                processing_at TEXT,
                 created_at TEXT NOT NULL,
                 paid_at TEXT
             )
         """)
+
+        # Миграция существующей базы без удаления старых данных.
+        purchase_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(purchases)").fetchall()
+        }
+        if "source" not in purchase_columns:
+            conn.execute(
+                "ALTER TABLE purchases ADD COLUMN source TEXT DEFAULT 'payment'"
+            )
+        if "payment_id" not in purchase_columns:
+            conn.execute(
+                "ALTER TABLE purchases ADD COLUMN payment_id TEXT"
+            )
+
+        payment_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(payments)").fetchall()
+        }
+        if "delivery_status" not in payment_columns:
+            conn.execute(
+                "ALTER TABLE payments ADD COLUMN delivery_status TEXT DEFAULT 'pending'"
+            )
+        if "processing_at" not in payment_columns:
+            conn.execute(
+                "ALTER TABLE payments ADD COLUMN processing_at TEXT"
+            )
+
+        # Один реальный платёж = максимум одна покупка.
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_purchases_payment_id
+            ON purchases(payment_id)
+            WHERE payment_id IS NOT NULL
+        """)
+
         conn.commit()
 
 def register_user(user):
@@ -423,12 +465,27 @@ def get_admin_stats():
     with closing(db_connect()) as conn:
         users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         paid = conn.execute(
-            "SELECT COUNT(*) FROM purchases WHERE status='paid'"
+            """
+            SELECT COUNT(*)
+            FROM purchases
+            WHERE status='paid' AND COALESCE(source, 'payment')='payment'
+            """
+        ).fetchone()[0]
+        manual = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM purchases
+            WHERE status='granted' OR COALESCE(source, '')='admin'
+            """
         ).fetchone()[0]
         revenue = conn.execute(
-            "SELECT COALESCE(SUM(amount), 0) FROM purchases WHERE status='paid'"
+            """
+            SELECT COALESCE(SUM(amount), 0)
+            FROM purchases
+            WHERE status='paid' AND COALESCE(source, 'payment')='payment'
+            """
         ).fetchone()[0]
-        return users, paid, revenue
+        return users, paid, revenue, manual
 
 def get_users(limit=100):
     with closing(db_connect()) as conn:
@@ -467,7 +524,7 @@ support_replies = {}
 
 # user_id пользователя, которому администратор сейчас отвечает
 # через кнопку "Ответить".
-admin_reply_target = None
+admin_reply_target = {}
 
 # Админская ручная выдача пакетов: admin_id -> target_user_id / '__WAITING_ID__'
 admin_grant_target = {}
@@ -765,13 +822,14 @@ def admin_grant_tariff_menu(profession_key):
 
 
 def admin_stats_text():
-    users, paid, revenue = get_admin_stats()
+    users, paid, revenue, manual = get_admin_stats()
     return (
         "<b>🔐 Админ-панель INKLAB</b>\n\n"
         f"👥 Всего пользователей: <b>{users}</b>\n"
         f"💳 Оплаченных покупок: <b>{paid}</b>\n"
+        f"📦 Выдано вручную: <b>{manual}</b>\n"
         f"💰 Заработано: <b>{revenue} ₽</b>\n\n"
-        "Статистика сохраняется в SQLite."
+        "Ручные выдачи не учитываются как доход."
     )
 
 
@@ -1167,9 +1225,9 @@ async def purchases_handler(callback: CallbackQuery):
 
     with closing(db_connect()) as conn:
         rows = conn.execute("""
-            SELECT profession, tariff, amount, created_at
+            SELECT profession, tariff, amount, status, source, created_at
             FROM purchases
-            WHERE user_id=? AND status='paid'
+            WHERE user_id=? AND status IN ('paid', 'granted')
             ORDER BY created_at DESC
         """, (callback.from_user.id,)).fetchall()
 
@@ -1177,7 +1235,12 @@ async def purchases_handler(callback: CallbackQuery):
         lines = ["<b>🛍 Мои покупки</b>\n"]
         for row in rows:
             lines.append(
-                f"• {row['profession']} - {row['tariff']} - {row['amount']} ₽"
+                (
+                    f"• {row['profession']} - {row['tariff']} - "
+                    f"{row['amount']} ₽"
+                    if row["source"] != "admin"
+                    else f"• {row['profession']} - {row['tariff']} - выдано вручную"
+                )
             )
         text = "\n".join(lines)
     else:
@@ -1236,7 +1299,6 @@ async def admin_command_handler(message: Message):
 
 @dp.message(F.text)
 async def support_message_handler(message: Message):
-    global admin_reply_target
 
     register_user(message.from_user)
 
@@ -1273,15 +1335,15 @@ async def support_message_handler(message: Message):
                 if match:
                     user_id = int(match.group(1))
 
-        if not user_id and admin_reply_target:
-            user_id = admin_reply_target
+        if not user_id:
+            user_id = admin_reply_target.get(message.from_user.id)
 
         if user_id:
             await bot.send_message(
                 chat_id=user_id,
                 text=f"💬 <b>Ответ поддержки:</b>\n\n{message.text}"
             )
-            admin_reply_target = None
+            admin_reply_target = {}
             await message.answer("✅ Ответ отправлен пользователю.")
         return
 
@@ -1353,7 +1415,6 @@ def callback_admin_id():
 
 @dp.callback_query(F.data.startswith("support_reply_"))
 async def support_reply_button_handler(callback: CallbackQuery):
-    global admin_reply_target
 
     if not is_admin(callback.from_user):
         await callback.answer("⛔ Доступ запрещен.", show_alert=True)
@@ -1365,7 +1426,7 @@ async def support_reply_button_handler(callback: CallbackQuery):
         await callback.answer("Ошибка пользователя.", show_alert=True)
         return
 
-    admin_reply_target = user_id
+    admin_reply_target[callback.from_user.id] = user_id
     await callback.answer("Теперь напиши ответ сообщением.")
     await callback.message.answer(
         "✍️ <b>Напиши ответ пользователю.</b>\n\n"
@@ -1469,10 +1530,10 @@ async def grant_tariff_handler(callback: CallbackQuery):
             conn.execute(
                 """
                 INSERT INTO purchases
-                    (user_id, profession, tariff, amount, status, created_at)
-                VALUES (?, ?, ?, ?, 'paid', ?)
+                    (user_id, profession, tariff, amount, status, source, payment_id, created_at)
+                VALUES (?, ?, ?, 0, 'granted', 'admin', NULL, ?)
                 """,
-                (target_id, profession["name"], tariff["name"], tariff["price"], now),
+                (target_id, profession["name"], tariff["name"], now),
             )
             conn.commit()
     except Exception:
@@ -1599,6 +1660,17 @@ async def main_menu_handler(callback: CallbackQuery):
 # =========================================================
 
 async def yookassa_webhook(request):
+    """
+    Обрабатывает payment.succeeded безопасно для повторных webhook-запросов.
+
+    Важная схема:
+    1. Проверяем реальный статус платежа через API YooKassa.
+    2. Атомарно забираем платеж в обработку.
+    3. Создаём покупку только один раз по payment_id.
+    4. Ставим delivery_status=pending до фактической отправки PDF.
+    5. Если Telegram временно не отправил PDF, возвращаем 500.
+       YooKassa повторит webhook, а бот повторит доставку.
+    """
     try:
         payload = await request.json()
         event = payload.get("event")
@@ -1618,17 +1690,28 @@ async def yookassa_webhook(request):
             return web.Response(text="OK")
 
         metadata = payment.get("metadata") or {}
-        user_id = int(metadata.get("user_id", "0") or "0")
-        product_type = metadata.get("product_type", "")
-        profession_key = metadata.get("profession_key", "")
-        tariff_key = metadata.get("tariff_key", "")
+        try:
+            meta_user_id = int(metadata.get("user_id", "0") or "0")
+        except (TypeError, ValueError):
+            meta_user_id = 0
 
-        if not user_id:
+        meta_product_type = metadata.get("product_type", "")
+        meta_profession_key = metadata.get("profession_key", "")
+        meta_tariff_key = metadata.get("tariff_key", "")
+
+        if not meta_user_id:
             logging.error("YooKassa payment has no valid user_id: %s", payment_id)
             return web.Response(text="OK")
 
-        amount = int(Decimal(str(payment.get("amount", {}).get("value", "0"))))
+        try:
+            amount = int(Decimal(str(payment.get("amount", {}).get("value", "0"))))
+        except Exception:
+            logging.error("Invalid amount in YooKassa payment: %s", payment_id)
+            return web.Response(text="OK")
 
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        # Сначала находим наш платёж и проверяем сумму.
         with closing(db_connect()) as conn:
             row = conn.execute(
                 "SELECT * FROM payments WHERE payment_id=?",
@@ -1639,9 +1722,6 @@ async def yookassa_webhook(request):
                 logging.error("Unknown YooKassa payment_id: %s", payment_id)
                 return web.Response(text="OK")
 
-            if row["status"] == "paid":
-                return web.Response(text="OK")
-
             if amount != int(row["amount"]):
                 logging.error(
                     "YooKassa amount mismatch: payment=%s expected=%s actual=%s",
@@ -1649,52 +1729,200 @@ async def yookassa_webhook(request):
                 )
                 return web.Response(text="OK")
 
-            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            conn.execute(
-                "UPDATE payments SET status='paid', paid_at=? WHERE payment_id=?",
-                (now, payment_id)
+            # Проверяем, что webhook соответствует тому, что бот создавал.
+            if (
+                int(row["user_id"]) != meta_user_id
+                or (row["product_type"] or "") != meta_product_type
+                or (row["profession_key"] or "") != meta_profession_key
+                or (row["tariff_key"] or "") != meta_tariff_key
+            ):
+                logging.error(
+                    "YooKassa metadata mismatch: payment=%s "
+                    "db=(user=%s product=%s profession=%s tariff=%s) "
+                    "api=(user=%s product=%s profession=%s tariff=%s)",
+                    payment_id,
+                    row["user_id"], row["product_type"],
+                    row["profession_key"], row["tariff_key"],
+                    meta_user_id, meta_product_type,
+                    meta_profession_key, meta_tariff_key,
+                )
+                return web.Response(text="OK")
+
+            # Если PDF уже доставлен, повторный webhook ничего не делает.
+            if row["status"] == "paid" and row["delivery_status"] == "delivered":
+                return web.Response(text="OK")
+
+            # Если платёж уже кем-то обрабатывается, не запускаем вторую
+            # параллельную отправку PDF.
+            if row["status"] == "processing":
+                processing_at = row["processing_at"]
+                stale = False
+                if processing_at:
+                    try:
+                        started = datetime.fromisoformat(processing_at)
+                        stale = (
+                            datetime.now(timezone.utc) - started
+                        ).total_seconds() > 600
+                    except ValueError:
+                        stale = True
+
+                if not stale:
+                    logging.info(
+                        "YooKassa payment already processing: %s",
+                        payment_id
+                    )
+                    return web.Response(text="OK")
+
+            # Атомарный claim: только один webhook получает право
+            # выполнять доставку.
+            cursor = conn.execute(
+                """
+                UPDATE payments
+                SET status='processing', processing_at=?
+                WHERE payment_id=?
+                  AND (
+                      status='pending'
+                      OR (
+                          status='processing'
+                          AND (
+                              processing_at IS NULL
+                              OR processing_at < ?
+                          )
+                      )
+                  )
+                """,
+                (
+                    now,
+                    payment_id,
+                    (
+                        datetime.now(timezone.utc) - timedelta(minutes=10)
+                    ).replace(microsecond=0).isoformat(),
+                ),
             )
+
+            # Если статус был paid с недоставленным PDF, выше UPDATE не
+            # сработает. Для такого случая отдельный claim ниже.
+            if cursor.rowcount != 1:
+                cursor = conn.execute(
+                    """
+                    UPDATE payments
+                    SET status='processing', processing_at=?
+                    WHERE payment_id=?
+                      AND status='paid'
+                      AND delivery_status='pending'
+                    """,
+                    (now, payment_id),
+                )
+
+            if cursor.rowcount != 1:
+                return web.Response(text="OK")
+
+            # Проверяем продукт до записи покупки.
+            product_type = row["product_type"]
+            profession_key = row["profession_key"] or ""
+            tariff_key = row["tariff_key"] or ""
 
             if product_type == "tariff":
                 profession = PROFESSIONS.get(profession_key)
                 tariff = TARIFFS.get(tariff_key)
-                if not profession or not tariff:
-                    logging.error("Invalid product metadata for payment %s", payment_id)
+                if not profession or not tariff or tariff["price"] != amount:
+                    logging.error(
+                        "Invalid tariff metadata for payment %s",
+                        payment_id
+                    )
+                    conn.execute(
+                        """
+                        UPDATE payments
+                        SET status='pending', processing_at=NULL
+                        WHERE payment_id=?
+                        """,
+                        (payment_id,),
+                    )
                     conn.commit()
                     return web.Response(text="OK")
 
-                conn.execute(
-                    """
-                    INSERT INTO purchases
-                        (user_id, profession, tariff, amount, status, created_at)
-                    VALUES (?, ?, ?, ?, 'paid', ?)
-                    """,
-                    (user_id, profession["name"], tariff["name"], amount, now)
+                purchase_data = (
+                    int(row["user_id"]),
+                    profession["name"],
+                    tariff["name"],
+                    amount,
+                    payment_id,
+                    now,
                 )
+                purchase_sql = """
+                    INSERT OR IGNORE INTO purchases
+                        (user_id, profession, tariff, amount, status,
+                         source, payment_id, created_at)
+                    VALUES (?, ?, ?, ?, 'paid', 'payment', ?, ?)
+                """
             elif product_type == "search_system":
-                conn.execute(
-                    """
-                    INSERT INTO purchases
-                        (user_id, profession, tariff, amount, status, created_at)
-                    VALUES (?, ?, ?, ?, 'paid', ?)
-                    """,
-                    (user_id, "📖 Система поиска клиентов", "99 ₽", amount, now)
+                if amount != 99:
+                    logging.error(
+                        "Invalid search_system amount for payment %s",
+                        payment_id
+                    )
+                    conn.execute(
+                        """
+                        UPDATE payments
+                        SET status='pending', processing_at=NULL
+                        WHERE payment_id=?
+                        """,
+                        (payment_id,),
+                    )
+                    conn.commit()
+                    return web.Response(text="OK")
+
+                purchase_data = (
+                    int(row["user_id"]),
+                    "📖 Система поиска клиентов",
+                    "99 ₽",
+                    amount,
+                    payment_id,
+                    now,
                 )
+                purchase_sql = """
+                    INSERT OR IGNORE INTO purchases
+                        (user_id, profession, tariff, amount, status,
+                         source, payment_id, created_at)
+                    VALUES (?, ?, ?, ?, 'paid', 'payment', ?, ?)
+                """
             else:
                 logging.error(
                     "Unknown product_type for payment %s: %s",
                     payment_id, product_type
                 )
+                conn.execute(
+                    """
+                    UPDATE payments
+                    SET status='pending', processing_at=NULL
+                    WHERE payment_id=?
+                    """,
+                    (payment_id,),
+                )
                 conn.commit()
                 return web.Response(text="OK")
 
+            conn.execute(purchase_sql, purchase_data)
+            conn.execute(
+                """
+                UPDATE payments
+                SET status='paid', paid_at=?, processing_at=NULL,
+                    delivery_status='pending'
+                WHERE payment_id=?
+                """,
+                (now, payment_id),
+            )
             conn.commit()
 
+        # PDF отправляем вне SQLite-транзакции, чтобы не держать БД
+        # заблокированной во время сетевого запроса Telegram.
         if product_type == "tariff":
-            await send_tariff_pdf(user_id, profession_key, tariff_key)
+            delivered = await send_tariff_pdf(
+                int(row["user_id"]), profession_key, tariff_key
+            )
         else:
-            await send_pdf_file(
-                chat_id=user_id,
+            delivered = await send_pdf_file(
+                chat_id=int(row["user_id"]),
                 pdf_path=PDF_FILES["search_system"],
                 caption=(
                     "📖 <b>Система поиска клиентов</b>\n\n"
@@ -1702,9 +1930,38 @@ async def yookassa_webhook(request):
                 ),
             )
 
+        if not delivered:
+            with closing(db_connect()) as conn:
+                conn.execute(
+                    """
+                    UPDATE payments
+                    SET delivery_status='pending', processing_at=NULL
+                    WHERE payment_id=?
+                    """,
+                    (payment_id,),
+                )
+                conn.commit()
+
+            logging.error(
+                "YooKassa payment paid but PDF delivery failed: %s",
+                payment_id,
+            )
+            return web.Response(status=500, text="DELIVERY_FAILED")
+
+        with closing(db_connect()) as conn:
+            conn.execute(
+                """
+                UPDATE payments
+                SET delivery_status='delivered', processing_at=NULL
+                WHERE payment_id=?
+                """,
+                (payment_id,),
+            )
+            conn.commit()
+
         logging.info(
-            "YooKassa payment succeeded: %s user=%s product=%s amount=%s",
-            payment_id, user_id, product_type, amount
+            "YooKassa payment succeeded and delivered: %s user=%s product=%s amount=%s",
+            payment_id, int(row["user_id"]), product_type, amount
         )
         return web.Response(text="OK")
 
@@ -1729,7 +1986,7 @@ body{margin:0;background:#0b0b0d;color:#fff;font-family:Arial,sans-serif;display
 .card{max-width:520px;padding:40px}.title{font-size:32px;font-weight:700}.text{color:#bbb;font-size:18px;line-height:1.5;margin-top:16px}
 </style></head>
 <body><div class="card"><div class="title">Оплата принята</div>
-<div class="text">Вернись в Telegram. После подтверждения платежа ЮKassa бот автоматически отправит покупку в чат.</div>
+<div class="text">Вернись в Telegram. После подтверждения платежа ЮKassa бот автоматически проверит оплату и отправит покупку в чат.</div>
 </div></body></html>"""
     )
 
@@ -1751,6 +2008,7 @@ async def on_startup():
     log_image_status()
     log_pdf_status()
     logging.info("YooKassa credentials configured: %s", bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY))
+    logging.info("SQLite migrations checked successfully.")
 
     await bot.set_webhook(
         url=WEBHOOK_URL
